@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "../original",
+			"name": "Original"
+		},
+		{
+			"path": "../remake",
+			"name": "Remake"
+		}
+	],
+	"settings": {}
+}

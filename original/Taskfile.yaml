@@ -1,0 +1,15 @@
+version: '3'
+
+tasks:
+  build:
+    cmds:
+      - rm -rf target
+      - mkdir -p target
+      - cp -r images/ target/images
+      - cp -r Texturepacks/ target/Texturepacks
+      - javac ./martomate/* -d target
+
+  run:
+    deps: [build]
+    dir: target
+    cmd: java martomate.Martomate
