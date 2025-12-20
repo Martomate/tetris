@@ -1,0 +1,38 @@
+[package]
+name = "tetris"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+wasm-opt = false
+
+[profile.release]
+strip = true
+
+[dependencies]
+anyhow = "1.0.100"
+env_logger = "0.11.8"
+log = "0.4.29"
+pollster = "0.4.0"
+wgpu = "28.0.0"
+winit = "0.30.12"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.7"
+console_log = "1.0"
+wgpu = { version = "28.0.0", features = ["webgl"]}
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4.56"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Window",
+    "Element",
+]}
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+    "--enable-bulk-memory",
+    "--enable-nontrapping-float-to-int",
+    "-Oz"
+]
