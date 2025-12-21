@@ -5,10 +5,13 @@ edition = "2024"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
-wasm-opt = false
 
-[profile.release]
-strip = true
+[profile.web-release]
+inherits = "release"
+codegen-units = 1
+strip = "debuginfo"
+opt-level = "z"
+lto = "thin"
 
 [dependencies]
 anyhow = "1.0.100"
@@ -35,10 +38,3 @@ web-sys = { version = "0.3", features = [
     "Window",
     "Element",
 ]}
-
-[package.metadata.wasm-pack.profile.release]
-wasm-opt = [
-    "--enable-bulk-memory",
-    "--enable-nontrapping-float-to-int",
-    "-Oz"
-]

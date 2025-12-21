@@ -1,0 +1,42 @@
+version: '3'
+
+tasks:
+  run:
+    env:
+      RUST_LOG: tetris=info
+    cmd: cargo run
+
+  build-web:
+    cmds:
+      - cargo build
+        --profile web-release
+        --target wasm32-unknown-unknown
+
+  package-web-fast:
+    deps:
+      - build-web
+    cmds:
+      - rm -rf out
+
+      - wasm-bindgen
+        --out-dir out/game
+        --target web
+        --no-typescript
+        ./target/wasm32-unknown-unknown/web-release/tetris.wasm
+      
+      - cp -r web/ out/
+
+  package-web:
+    deps:
+      - package-web-fast
+    cmds:
+      - wasm-opt
+        out/game/tetris_bg.wasm
+        -o out/game/tetris_bg.opt.wasm
+        -Oz
+        --enable-bulk-memory
+        --enable-nontrapping-float-to-int
+
+      - mv
+        out/game/tetris_bg.opt.wasm
+        out/game/tetris_bg.wasm
