@@ -1,10 +1,11 @@
 mod texture;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
+    dpi,
     event::*,
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
@@ -14,8 +15,6 @@ use winit::{
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-static DIFFUSE_BYTES: &[u8] = include_bytes!("assets/image.png");
-
 pub struct State {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -23,12 +22,17 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     is_surface_configured: bool,
     render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    num_vertices: u32,
-    diffuse_bind_group: wgpu::BindGroup,
-    diffuse_texture: texture::Texture,
     window: Arc<Window>,
     clear_color: wgpu::Color,
+
+    board_width: usize,
+    board_height: usize,
+    board: Vec<Vec<char>>,
+
+    piece_vertex_buffers: HashMap<char, wgpu::Buffer>,
+    piece_textures: HashMap<char, texture::Texture>,
+    piece_texture_bind_groups: HashMap<char, wgpu::BindGroup>,
+    piece_offsets: HashMap::<char, [(i8, i8); 4]>,
 }
 
 impl State {
@@ -87,8 +91,25 @@ impl State {
             desired_maximum_frame_latency: 2,
         };
 
-        let diffuse_texture =
-            texture::Texture::from_bytes(&device, &queue, DIFFUSE_BYTES, "image.png").unwrap();
+        static ALL_PIECES: &[(char, &[u8])] = &[
+            ('I', include_bytes!("assets/I.png")),
+            ('J', include_bytes!("assets/J.png")),
+            ('L', include_bytes!("assets/L.png")),
+            ('O', include_bytes!("assets/O.png")),
+            ('S', include_bytes!("assets/S.png")),
+            ('T', include_bytes!("assets/T.png")),
+            ('Z', include_bytes!("assets/Z.png")),
+        ];
+
+        let piece_textures = ALL_PIECES
+            .iter()
+            .map(|(ch, texture_bytes)| {
+                (
+                    *ch,
+                    texture::Texture::from_bytes(&device, &queue, texture_bytes, "piece").unwrap(),
+                )
+            })
+            .collect::<HashMap<char, texture::Texture>>();
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -113,20 +134,28 @@ impl State {
                 label: Some("texture_bind_group_layout"),
             });
 
-        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
-                },
-            ],
-            label: Some("diffuse_bind_group"),
-        });
+        let piece_texture_bind_groups = piece_textures
+            .iter()
+            .map(|(letter, tex)| {
+                (
+                    *letter,
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        layout: &texture_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&tex.view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&tex.sampler),
+                            },
+                        ],
+                        label: Some("diffuse_bind_group"),
+                    }),
+                )
+            })
+            .collect();
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
@@ -178,11 +207,19 @@ impl State {
             cache: None,
         });
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let piece_vertex_buffers = piece_textures
+            .keys()
+            .map(|l| {
+                (
+                    *l,
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Vertex Buffer"),
+                        contents: &[0; Vertex::desc().array_stride as usize * 10 * 20],
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    }),
+                )
+            })
+            .collect::<HashMap<char, wgpu::Buffer>>();
 
         Ok(Self {
             surface,
@@ -191,17 +228,30 @@ impl State {
             config,
             is_surface_configured: false,
             render_pipeline,
-            vertex_buffer,
-            num_vertices: VERTICES.len() as u32,
-            diffuse_bind_group,
-            diffuse_texture,
+            piece_vertex_buffers,
             window,
             clear_color: wgpu::Color {
-                r: 0.1,
-                g: 0.2,
-                b: 0.3,
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
                 a: 1.0,
             },
+
+            board_width: 10,
+            board_height: 20,
+            board: vec![vec!['X'; 10]; 20],
+
+            piece_textures,
+            piece_texture_bind_groups,
+            piece_offsets: [
+                ('O', [ ( 0,-1 ), ( 0, 0 ), ( 1, 0 ), ( 1,-1 ) ]),
+                ('I', [ ( 0,-1 ), ( 0, 0 ), ( 0, 1 ), ( 0, 2 ) ]),
+                ('J', [ ( 1,-1 ), ( 1, 0 ), ( 1, 1 ), ( 0, 1 ) ]),
+                ('L', [ ( 0,-1 ), ( 0, 0 ), ( 0, 1 ), ( 1, 1 ) ]),
+                ('Z', [ ( 1,-1 ), ( 1, 0 ), ( 0, 0 ), ( 0, 1 ) ]),
+                ('S', [ ( 0,-1 ), ( 0, 0 ), ( 1, 0 ), ( 1, 1 ) ]),
+                ('T', [ ( 0,-1 ), ( 0, 0 ), ( 0, 1 ), ( 1, 0 ) ]),
+            ].into_iter().collect()
         })
     }
 
@@ -252,10 +302,40 @@ impl State {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
 
-            render_pass.draw(0..self.num_vertices, 0..1);
+            let tw = 2.0 / self.board_width as f32;
+            let th = 2.0 / self.board_height as f32;
+
+            for (letter, bind_group) in &self.piece_texture_bind_groups {
+                let mut spots = Vec::new();
+                for (y, row) in self.board.iter().enumerate() {
+                    for (x, l) in row.iter().enumerate() {
+                        if l == letter {
+                            spots.push((x, y));
+                        }
+                    }
+                }
+
+                let tiles = spots
+                    .iter()
+                    .map(|&(x, y)| {
+                        Tile::new(tw, th).at(tw * x as f32 - 1.0, th * y as f32 - 1.0)
+                    })
+                    .collect::<Vec<_>>();
+
+                let vertices = tiles.iter().flat_map(|t| t.vertices).collect::<Vec<_>>();
+
+                self.queue.write_buffer(
+                    &self.piece_vertex_buffers[letter],
+                    0,
+                    bytemuck::cast_slice(&vertices),
+                );
+                render_pass.set_bind_group(0, bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.piece_vertex_buffers[letter].slice(..));
+
+                let buffer_len = spots.len() as u32 * 6;
+                render_pass.draw(0..buffer_len, 0..1);
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -267,20 +347,30 @@ impl State {
     fn handle_key(&self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
         match (code, is_pressed) {
             (KeyCode::Escape, true) => event_loop.exit(),
+            (KeyCode::ArrowUp, true) => {}
+            (KeyCode::ArrowLeft, true) => {}
+            (KeyCode::ArrowDown, true) => {}
+            (KeyCode::ArrowRight, true) => {}
             _ => {}
         }
     }
 
-    fn handle_mouse_moved(&mut self, x: f64, y: f64) {
-        self.clear_color = wgpu::Color {
-            r: x / self.window.inner_size().width as f64,
-            g: y / self.window.inner_size().height as f64,
-            b: 0.3,
-            a: 1.0,
-        };
-    }
+    fn handle_mouse_moved(&mut self, x: f64, y: f64) {}
 
-    fn update(&mut self) {}
+    fn update(&mut self) {
+        let mut piece_y = 2;
+        let mut piece_x = 8;
+        for (l, offsets) in self.piece_offsets.iter() {
+            for (dx, dy) in offsets {
+                self.board[(piece_y + dy) as usize][(piece_x + dx) as usize] = *l;
+            }
+            piece_y += 2;
+            piece_x += 3;
+            if piece_x > 8 {
+                piece_x -= 8;
+            }
+        }
+    }
 }
 
 #[repr(C)]
@@ -290,38 +380,56 @@ struct Vertex {
     tex_coords: [f32; 2],
 }
 
-const VERTICES: &[Vertex] = &[
-    Vertex {
-        position: [-0.5, 0.5, 0.0],
-        tex_coords: [0.0, 0.0],
-    },
-    Vertex {
-        position: [-0.5, -0.5, 0.0],
-        tex_coords: [0.0, 1.0],
-    },
-    Vertex {
-        position: [0.5, 0.5, 0.0],
-        tex_coords: [1.0, 0.0],
-    },
-    Vertex {
-        position: [0.5, 0.5, 0.0],
-        tex_coords: [1.0, 0.0],
-    },
-    Vertex {
-        position: [-0.5, -0.5, 0.0],
-        tex_coords: [0.0, 1.0],
-    },
-    Vertex {
-        position: [0.5, -0.5, 0.0],
-        tex_coords: [1.0, 1.0],
-    },
-];
+struct Tile {
+    vertices: [Vertex; 6],
+}
+
+impl Tile {
+    fn new(w: f32, h: f32) -> Tile {
+        Tile {
+            vertices: [
+                Vertex {
+                    position: [0.0, h, 0.0],
+                    tex_coords: [0.0, 0.0],
+                },
+                Vertex {
+                    position: [0.0, 0.0, 0.0],
+                    tex_coords: [0.0, 1.0],
+                },
+                Vertex {
+                    position: [w, h, 0.0],
+                    tex_coords: [1.0, 0.0],
+                },
+                Vertex {
+                    position: [w, h, 0.0],
+                    tex_coords: [1.0, 0.0],
+                },
+                Vertex {
+                    position: [0.0, 0.0, 0.0],
+                    tex_coords: [0.0, 1.0],
+                },
+                Vertex {
+                    position: [w, 0.0, 0.0],
+                    tex_coords: [1.0, 1.0],
+                },
+            ],
+        }
+    }
+
+    fn at(mut self, x: f32, y: f32) -> Self {
+        for v in &mut self.vertices {
+            v.position[0] += x;
+            v.position[1] += y;
+        }
+        self
+    }
+}
 
 impl Vertex {
     const ATTRIBS: [wgpu::VertexAttribute; 2] =
         wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2];
 
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
+    const fn desc() -> wgpu::VertexBufferLayout<'static> {
         use std::mem;
 
         wgpu::VertexBufferLayout {
@@ -353,7 +461,8 @@ impl App {
 impl ApplicationHandler<State> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         #[allow(unused_mut)]
-        let mut window_attributes = Window::default_attributes();
+        let mut window_attributes =
+            Window::default_attributes().with_inner_size(dpi::LogicalSize::new(320, 640));
 
         #[cfg(target_arch = "wasm32")]
         {
