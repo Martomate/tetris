@@ -3,6 +3,7 @@ mod texture;
 
 use std::{collections::HashMap, sync::Arc};
 
+use rand::Rng;
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -35,7 +36,9 @@ pub struct State {
     piece_texture_bind_groups: HashMap<char, wgpu::BindGroup>,
     shapes: HashMap<char, Shape>,
 
+    is_game_over: bool,
     moving_piece: Option<Piece>,
+    next_shape: Option<char>,
 }
 
 impl State {
@@ -224,6 +227,19 @@ impl State {
             })
             .collect::<HashMap<char, wgpu::Buffer>>();
 
+        let shapes: HashMap<char, Shape> = [
+                ('O', [(0, -1), (0, 0), (1, 0), (1, -1)]),
+                ('I', [(0, -1), (0, 0), (0, 1), (0, 2)]),
+                ('J', [(1, -1), (1, 0), (1, 1), (0, 1)]),
+                ('L', [(0, -1), (0, 0), (0, 1), (1, 1)]),
+                ('Z', [(1, -1), (1, 0), (0, 0), (0, 1)]),
+                ('S', [(0, -1), (0, 0), (1, 0), (1, 1)]),
+                ('T', [(0, -1), (0, 0), (0, 1), (1, 0)]),
+            ]
+            .map(|(l, offsets)| (l, Shape::new(offsets.map(|(dx, dy)| Pos::new(dx, dy)))))
+            .into_iter()
+            .collect();
+
         Ok(Self {
             surface,
             device,
@@ -244,20 +260,11 @@ impl State {
 
             piece_textures,
             piece_texture_bind_groups,
-            shapes: [
-                ('O', [(0, -1), (0, 0), (1, 0), (1, -1)]),
-                ('I', [(0, -1), (0, 0), (0, 1), (0, 2)]),
-                ('J', [(1, -1), (1, 0), (1, 1), (0, 1)]),
-                ('L', [(0, -1), (0, 0), (0, 1), (1, 1)]),
-                ('Z', [(1, -1), (1, 0), (0, 0), (0, 1)]),
-                ('S', [(0, -1), (0, 0), (1, 0), (1, 1)]),
-                ('T', [(0, -1), (0, 0), (0, 1), (1, 0)]),
-            ]
-            .map(|(l, offsets)| (l, Shape::new(offsets.map(|(dx, dy)| Pos::new(dx, dy)))))
-            .into_iter()
-            .collect(),
+            shapes,
 
+            is_game_over: false,
             moving_piece: None,
+            next_shape: None,
         })
     }
 
@@ -425,26 +432,64 @@ impl State {
 
     fn handle_dropped_piece(&mut self) {
         if let Some(piece) = self.moving_piece.take() {
-            for pos in self.shapes[&piece.letter].rotated(piece.rotation).at(piece.origin) {
+            for pos in self.shapes[&piece.letter]
+                .rotated(piece.rotation)
+                .at(piece.origin)
+            {
                 self.board.set_tile(pos, piece.letter);
             }
         }
+
+        self.remove_full_rows();
     }
 
+    fn remove_full_rows(&mut self) {
+        let mut removed_rows = 0;
+        for y in (0..self.board.height).rev() {
+            let mut full_row = true;
+            for x in 0..self.board.width {
+                if self.board.get_tile(Pos::new(x as i8, y as i8)).is_none() {
+                    full_row = false;
+                    break;
+                }
+            }
+            if full_row {
+                removed_rows += 1;
+            } else {
+                for x in 0..self.board.width {
+                    if let Some(tile) = self.board.get_tile(Pos::new(x as i8, y as i8)) {
+                        self.board.set_tile(Pos::new(x as i8, (y + removed_rows) as i8), tile);
+                    }
+                }
+            }
+            if removed_rows > 0 {
+                for x in 0..self.board.width {
+                    self.board.clear_tile(Pos::new(x as i8, y as i8));
+                }
+            }
+        }
+    }
+    
     fn handle_mouse_moved(&mut self, x: f64, y: f64) {}
 
     fn update(&mut self) {
-        if self.moving_piece.is_none() {
+        if self.is_game_over {
+            return;
+        }
+        if self.moving_piece.is_none() && self.next_shape.is_some() {
             let piece = Piece {
-                letter: 'J',
+                letter: self.next_shape.take().unwrap(),
                 rotation: 0,
                 origin: Pos { x: 4, y: 1 },
             };
             self.moving_piece = Some(piece);
-            
+
             if self.piece_collides(piece) {
-                println!("Game Over!");
+                self.is_game_over = true;
             }
+        }
+        if self.next_shape.is_none() {
+            self.next_shape = Some(random_shape(&self.shapes.keys().cloned().collect::<Vec<char>>()));
         }
     }
 
@@ -457,6 +502,10 @@ impl State {
             .iter()
             .any(|&pos| !self.board.contains(pos) || self.board.get_tile(pos).is_some())
     }
+}
+
+fn random_shape(values: &[char]) -> char {
+    values[rand::rng().random_range(0..values.len())]
 }
 
 #[repr(C)]
