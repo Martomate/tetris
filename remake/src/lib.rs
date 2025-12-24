@@ -1,3 +1,4 @@
+mod game;
 mod texture;
 
 use std::{collections::HashMap, sync::Arc};
@@ -15,6 +16,8 @@ use winit::{
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
+use crate::game::{Board, Piece, Pos, Shape};
+
 pub struct State {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -25,14 +28,14 @@ pub struct State {
     window: Arc<Window>,
     clear_color: wgpu::Color,
 
-    board_width: usize,
-    board_height: usize,
-    board: Vec<Vec<char>>,
+    board: Board,
 
     piece_vertex_buffers: HashMap<char, wgpu::Buffer>,
     piece_textures: HashMap<char, texture::Texture>,
     piece_texture_bind_groups: HashMap<char, wgpu::BindGroup>,
-    piece_offsets: HashMap::<char, [(i8, i8); 4]>,
+    shapes: HashMap<char, Shape>,
+
+    moving_piece: Option<Piece>,
 }
 
 impl State {
@@ -237,21 +240,24 @@ impl State {
                 a: 1.0,
             },
 
-            board_width: 10,
-            board_height: 20,
-            board: vec![vec!['X'; 10]; 20],
+            board: Board::new(10, 20),
 
             piece_textures,
             piece_texture_bind_groups,
-            piece_offsets: [
-                ('O', [ ( 0,-1 ), ( 0, 0 ), ( 1, 0 ), ( 1,-1 ) ]),
-                ('I', [ ( 0,-1 ), ( 0, 0 ), ( 0, 1 ), ( 0, 2 ) ]),
-                ('J', [ ( 1,-1 ), ( 1, 0 ), ( 1, 1 ), ( 0, 1 ) ]),
-                ('L', [ ( 0,-1 ), ( 0, 0 ), ( 0, 1 ), ( 1, 1 ) ]),
-                ('Z', [ ( 1,-1 ), ( 1, 0 ), ( 0, 0 ), ( 0, 1 ) ]),
-                ('S', [ ( 0,-1 ), ( 0, 0 ), ( 1, 0 ), ( 1, 1 ) ]),
-                ('T', [ ( 0,-1 ), ( 0, 0 ), ( 0, 1 ), ( 1, 0 ) ]),
-            ].into_iter().collect()
+            shapes: [
+                ('O', [(0, -1), (0, 0), (1, 0), (1, -1)]),
+                ('I', [(0, -1), (0, 0), (0, 1), (0, 2)]),
+                ('J', [(1, -1), (1, 0), (1, 1), (0, 1)]),
+                ('L', [(0, -1), (0, 0), (0, 1), (1, 1)]),
+                ('Z', [(1, -1), (1, 0), (0, 0), (0, 1)]),
+                ('S', [(0, -1), (0, 0), (1, 0), (1, 1)]),
+                ('T', [(0, -1), (0, 0), (0, 1), (1, 0)]),
+            ]
+            .map(|(l, offsets)| (l, Shape::new(offsets.map(|(dx, dy)| Pos::new(dx, dy)))))
+            .into_iter()
+            .collect(),
+
+            moving_piece: None,
         })
     }
 
@@ -303,15 +309,23 @@ impl State {
 
             render_pass.set_pipeline(&self.render_pipeline);
 
-            let tw = 2.0 / self.board_width as f32;
-            let th = 2.0 / self.board_height as f32;
+            let tw = 2.0 / self.board.width as f32;
+            let th = 2.0 / self.board.height as f32;
 
             for (letter, bind_group) in &self.piece_texture_bind_groups {
-                let mut spots = Vec::new();
-                for (y, row) in self.board.iter().enumerate() {
+                let mut spots: Vec<(u8, u8)> = Vec::new();
+                for (y, row) in self.board.tiles.iter().enumerate() {
                     for (x, l) in row.iter().enumerate() {
                         if l == letter {
-                            spots.push((x, y));
+                            spots.push((x as u8, y as u8));
+                        }
+                    }
+                }
+
+                if let Some(piece) = self.moving_piece.filter(|p| p.letter == *letter) {
+                    for pos in self.shapes[letter].rotated(piece.rotation).at(piece.origin) {
+                        if self.board.contains(pos) {
+                            spots.push((pos.x as u8, pos.y as u8));
                         }
                     }
                 }
@@ -319,7 +333,7 @@ impl State {
                 let tiles = spots
                     .iter()
                     .map(|&(x, y)| {
-                        Tile::new(tw, th).at(tw * x as f32 - 1.0, th * y as f32 - 1.0)
+                        Tile::new(tw, th).at(tw * x as f32 - 1.0, 1.0 - th * (y + 1) as f32)
                     })
                     .collect::<Vec<_>>();
 
@@ -344,32 +358,104 @@ impl State {
         Ok(())
     }
 
-    fn handle_key(&self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
+    fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
         match (code, is_pressed) {
             (KeyCode::Escape, true) => event_loop.exit(),
-            (KeyCode::ArrowUp, true) => {}
-            (KeyCode::ArrowLeft, true) => {}
-            (KeyCode::ArrowDown, true) => {}
-            (KeyCode::ArrowRight, true) => {}
+            (KeyCode::ArrowUp, true) => {
+                if let Some(piece) = self.moving_piece {
+                    let updated = Piece {
+                        rotation: (piece.rotation + 1) % 4,
+                        ..piece
+                    };
+                    if !self.piece_collides(updated) {
+                        self.moving_piece = Some(updated);
+                    }
+                }
+            }
+            (KeyCode::ArrowLeft, true) => {
+                if let Some(piece) = self.moving_piece {
+                    let updated = Piece {
+                        origin: piece.origin + Pos::new(-1, 0),
+                        ..piece
+                    };
+                    if !self.piece_collides(updated) {
+                        self.moving_piece = Some(updated);
+                    }
+                }
+            }
+            (KeyCode::ArrowDown, true) => {
+                if let Some(piece) = self.moving_piece {
+                    let updated = Piece {
+                        origin: piece.origin + Pos::new(0, 1),
+                        ..piece
+                    };
+                    if !self.piece_collides(updated) {
+                        self.moving_piece = Some(updated);
+                    }
+                }
+            }
+            (KeyCode::ArrowRight, true) => {
+                if let Some(piece) = self.moving_piece {
+                    let updated = Piece {
+                        origin: piece.origin + Pos::new(1, 0),
+                        ..piece
+                    };
+                    if !self.piece_collides(updated) {
+                        self.moving_piece = Some(updated);
+                    }
+                }
+            }
+            (KeyCode::KeyD, true) => {
+                while let Some(piece) = self.moving_piece {
+                    let updated = Piece {
+                        origin: piece.origin + Pos::new(0, 1),
+                        ..piece
+                    };
+                    if !self.piece_collides(updated) {
+                        self.moving_piece = Some(updated);
+                    } else {
+                        self.handle_dropped_piece();
+                        break;
+                    }
+                }
+            }
             _ => {}
+        }
+    }
+
+    fn handle_dropped_piece(&mut self) {
+        if let Some(piece) = self.moving_piece.take() {
+            for pos in self.shapes[&piece.letter].rotated(piece.rotation).at(piece.origin) {
+                self.board.set_tile(pos, piece.letter);
+            }
         }
     }
 
     fn handle_mouse_moved(&mut self, x: f64, y: f64) {}
 
     fn update(&mut self) {
-        let mut piece_y = 2;
-        let mut piece_x = 8;
-        for (l, offsets) in self.piece_offsets.iter() {
-            for (dx, dy) in offsets {
-                self.board[(piece_y + dy) as usize][(piece_x + dx) as usize] = *l;
-            }
-            piece_y += 2;
-            piece_x += 3;
-            if piece_x > 8 {
-                piece_x -= 8;
+        if self.moving_piece.is_none() {
+            let piece = Piece {
+                letter: 'J',
+                rotation: 0,
+                origin: Pos { x: 4, y: 1 },
+            };
+            self.moving_piece = Some(piece);
+            
+            if self.piece_collides(piece) {
+                println!("Game Over!");
             }
         }
+    }
+
+    fn piece_collides(&self, piece: Piece) -> bool {
+        let positions = self.shapes[&piece.letter]
+            .rotated(piece.rotation)
+            .at(piece.origin);
+
+        positions
+            .iter()
+            .any(|&pos| !self.board.contains(pos) || self.board.get_tile(pos).is_some())
     }
 }
 
