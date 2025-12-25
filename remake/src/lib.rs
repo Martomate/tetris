@@ -41,6 +41,7 @@ pub struct State {
     piece_texture_bind_groups: HashMap<char, wgpu::BindGroup>,
     shapes: HashMap<char, Shape>,
 
+    has_started: bool,
     is_game_over: bool,
     is_paused: bool,
     moving_piece: Option<Piece>,
@@ -276,6 +277,7 @@ impl State {
             piece_texture_bind_groups,
             shapes,
 
+            has_started: false,
             is_game_over: false,
             is_paused: false,
             moving_piece: None,
@@ -398,8 +400,18 @@ impl State {
 
     fn handle_key(&mut self, code: KeyCode, is_pressed: bool) {
         match (code, is_pressed) {
-            (KeyCode::Escape, true) => self.is_paused = !self.is_paused,
-            (KeyCode::KeyP, true) => self.is_paused = !self.is_paused,
+            (KeyCode::Escape, true) => {
+                self.is_paused = !self.is_paused;
+            }
+            (KeyCode::KeyP, true) => {
+                self.is_paused = !self.is_paused;
+            }
+            (KeyCode::Space, true) => {
+                if !self.has_started {
+                    self.has_started = true;
+                    self.is_paused = false;
+                }
+            }
             (KeyCode::ArrowUp, true) => {
                 if let Some(piece) = self.moving_piece {
                     let updated = Piece {
@@ -511,6 +523,9 @@ impl State {
         let time_passed = now.signed_duration_since(self.time_of_last_update);
         self.time_of_last_update = now;
 
+        if !self.has_started {
+            return;
+        }
         if self.is_game_over {
             return;
         }
@@ -678,7 +693,7 @@ impl ApplicationHandler<State> for App {
                 }
             }
             WindowEvent::Focused(focused) => {
-                if !focused {
+                if !focused && state.has_started {
                     state.is_paused = true;
                 }
             }
