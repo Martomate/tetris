@@ -1,7 +1,11 @@
 mod game;
 mod texture;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use rand::Rng;
 use wgpu::util::DeviceExt;
@@ -39,6 +43,12 @@ pub struct State {
     is_game_over: bool,
     moving_piece: Option<Piece>,
     next_shape: Option<char>,
+
+    levels_to_win: u8,
+    rows_per_level: u8,
+    level: u8,
+    level_progress: u8,
+    time_of_next_move: Option<Instant>,
 }
 
 impl State {
@@ -228,17 +238,17 @@ impl State {
             .collect::<HashMap<char, wgpu::Buffer>>();
 
         let shapes: HashMap<char, Shape> = [
-                ('O', [(0, -1), (0, 0), (1, 0), (1, -1)]),
-                ('I', [(0, -1), (0, 0), (0, 1), (0, 2)]),
-                ('J', [(1, -1), (1, 0), (1, 1), (0, 1)]),
-                ('L', [(0, -1), (0, 0), (0, 1), (1, 1)]),
-                ('Z', [(1, -1), (1, 0), (0, 0), (0, 1)]),
-                ('S', [(0, -1), (0, 0), (1, 0), (1, 1)]),
-                ('T', [(0, -1), (0, 0), (0, 1), (1, 0)]),
-            ]
-            .map(|(l, offsets)| (l, Shape::new(offsets.map(|(dx, dy)| Pos::new(dx, dy)))))
-            .into_iter()
-            .collect();
+            ('O', [(0, -1), (0, 0), (1, 0), (1, -1)]),
+            ('I', [(0, -1), (0, 0), (0, 1), (0, 2)]),
+            ('J', [(1, -1), (1, 0), (1, 1), (0, 1)]),
+            ('L', [(0, -1), (0, 0), (0, 1), (1, 1)]),
+            ('Z', [(1, -1), (1, 0), (0, 0), (0, 1)]),
+            ('S', [(0, -1), (0, 0), (1, 0), (1, 1)]),
+            ('T', [(0, -1), (0, 0), (0, 1), (1, 0)]),
+        ]
+        .map(|(l, offsets)| (l, Shape::new(offsets.map(|(dx, dy)| Pos::new(dx, dy)))))
+        .into_iter()
+        .collect();
 
         Ok(Self {
             surface,
@@ -265,6 +275,12 @@ impl State {
             is_game_over: false,
             moving_piece: None,
             next_shape: None,
+
+            levels_to_win: 60,
+            rows_per_level: 10,
+            level: 0,
+            level_progress: 0,
+            time_of_next_move: None,
         })
     }
 
@@ -365,6 +381,15 @@ impl State {
         Ok(())
     }
 
+    /// 800 ms (level 0) to 0 ms (max level), reducing faster in the beginning
+    fn time_between_moves(&self) -> Duration {
+        use std::f32::consts::PI;
+
+        let progress = self.level as f32 / self.levels_to_win as f32;
+        let speed_up = (progress * PI / 2.0).sin();
+        Duration::from_millis(((1.0 - speed_up) * 800.0) as u64)
+    }
+
     fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
         match (code, is_pressed) {
             (KeyCode::Escape, true) => event_loop.exit(),
@@ -458,7 +483,8 @@ impl State {
             } else {
                 for x in 0..self.board.width {
                     if let Some(tile) = self.board.get_tile(Pos::new(x as i8, y as i8)) {
-                        self.board.set_tile(Pos::new(x as i8, (y + removed_rows) as i8), tile);
+                        self.board
+                            .set_tile(Pos::new(x as i8, (y + removed_rows) as i8), tile);
                     }
                 }
             }
@@ -468,13 +494,36 @@ impl State {
                 }
             }
         }
+        self.level_progress += removed_rows;
     }
-    
+
     fn handle_mouse_moved(&mut self, x: f64, y: f64) {}
 
     fn update(&mut self) {
         if self.is_game_over {
             return;
+        }
+        if self.level_progress >= self.rows_per_level {
+            self.level_progress -= self.rows_per_level;
+            self.level += 1;
+            println!("Level: {}, time: {:?}", self.level, self.time_between_moves());
+        }
+        if let Some(ts) = self.time_of_next_move
+            && ts <= Instant::now()
+        {
+            self.time_of_next_move = Some(ts + self.time_between_moves());
+
+            if let Some(piece) = self.moving_piece {
+                let updated = Piece {
+                    origin: piece.origin + Pos::new(0, 1),
+                    ..piece
+                };
+                if !self.piece_collides(updated) {
+                    self.moving_piece = Some(updated);
+                } else {
+                    self.handle_dropped_piece();
+                }
+            }
         }
         if self.moving_piece.is_none() && self.next_shape.is_some() {
             let piece = Piece {
@@ -483,13 +532,16 @@ impl State {
                 origin: Pos { x: 4, y: 1 },
             };
             self.moving_piece = Some(piece);
+            self.time_of_next_move = Some(Instant::now() + self.time_between_moves());
 
             if self.piece_collides(piece) {
                 self.is_game_over = true;
             }
         }
         if self.next_shape.is_none() {
-            self.next_shape = Some(random_shape(&self.shapes.keys().cloned().collect::<Vec<char>>()));
+            self.next_shape = Some(random_shape(
+                &self.shapes.keys().cloned().collect::<Vec<char>>(),
+            ));
         }
     }
 
