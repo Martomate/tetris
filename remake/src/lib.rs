@@ -230,7 +230,7 @@ impl State {
                     *l,
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("Vertex Buffer"),
-                        contents: &[0; Vertex::desc().array_stride as usize * 10 * 20],
+                        contents: &[0; Vertex::desc().array_stride as usize * 6 * 10 * 20],
                         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     }),
                 )
