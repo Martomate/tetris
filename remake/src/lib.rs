@@ -1,12 +1,9 @@
 mod game;
 mod texture;
 
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, sync::Arc};
 
+use chrono::{DateTime, TimeDelta, Utc};
 use rand::Rng;
 use wgpu::util::DeviceExt;
 use winit::{
@@ -48,7 +45,7 @@ pub struct State {
     rows_per_level: u8,
     level: u8,
     level_progress: u8,
-    time_of_next_move: Option<Instant>,
+    time_of_next_move: Option<DateTime<Utc>>,
 }
 
 impl State {
@@ -382,12 +379,12 @@ impl State {
     }
 
     /// 800 ms (level 0) to 0 ms (max level), reducing faster in the beginning
-    fn time_between_moves(&self) -> Duration {
+    fn time_between_moves(&self) -> TimeDelta {
         use std::f32::consts::PI;
 
         let progress = self.level as f32 / self.levels_to_win as f32;
         let speed_up = (progress * PI / 2.0).sin();
-        Duration::from_millis(((1.0 - speed_up) * 800.0) as u64)
+        TimeDelta::milliseconds(((1.0 - speed_up) * 800.0) as i64)
     }
 
     fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
@@ -506,10 +503,9 @@ impl State {
         if self.level_progress >= self.rows_per_level {
             self.level_progress -= self.rows_per_level;
             self.level += 1;
-            println!("Level: {}, time: {:?}", self.level, self.time_between_moves());
         }
         if let Some(ts) = self.time_of_next_move
-            && ts <= Instant::now()
+            && ts <= Utc::now()
         {
             self.time_of_next_move = Some(ts + self.time_between_moves());
 
@@ -532,7 +528,7 @@ impl State {
                 origin: Pos { x: 4, y: 1 },
             };
             self.moving_piece = Some(piece);
-            self.time_of_next_move = Some(Instant::now() + self.time_between_moves());
+            self.time_of_next_move = Some(Utc::now() + self.time_between_moves());
 
             if self.piece_collides(piece) {
                 self.is_game_over = true;

@@ -16,6 +16,7 @@ lto = "thin"
 [dependencies]
 anyhow = "1.0.100"
 bytemuck = { version = "1.24.0", features = ["derive"] }
+chrono = { version = "0.4.42", default-features = false, features = ["now"] }
 env_logger = "0.11.8"
 log = "0.4.29"
 pollster = "0.4.0"
@@ -39,3 +40,5 @@ web-sys = { version = "0.3", features = [
     "Window",
     "Element",
 ]}
+getrandom = { version = "*", features = ["wasm_js"] }
+chrono = { version = "0.4.42", default-features = false, features = ["now", "wasmbind"] }

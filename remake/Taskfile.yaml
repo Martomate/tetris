@@ -40,3 +40,8 @@ tasks:
       - mv
         out/game/tetris_bg.opt.wasm
         out/game/tetris_bg.wasm
+
+  check:
+    cmds:
+      - task: package-web-fast # make sure the web version compiles
+      - cargo test
