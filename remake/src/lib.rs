@@ -38,6 +38,7 @@ pub struct State {
     shapes: HashMap<char, Shape>,
 
     is_game_over: bool,
+    is_paused: bool,
     moving_piece: Option<Piece>,
     next_shape: Option<char>,
 
@@ -45,7 +46,9 @@ pub struct State {
     rows_per_level: u8,
     level: u8,
     level_progress: u8,
-    time_of_next_move: Option<DateTime<Utc>>,
+
+    time_since_last_move: TimeDelta,
+    time_of_last_update: DateTime<Utc>,
 }
 
 impl State {
@@ -270,6 +273,7 @@ impl State {
             shapes,
 
             is_game_over: false,
+            is_paused: false,
             moving_piece: None,
             next_shape: None,
 
@@ -277,7 +281,8 @@ impl State {
             rows_per_level: 10,
             level: 0,
             level_progress: 0,
-            time_of_next_move: None,
+            time_since_last_move: TimeDelta::zero(),
+            time_of_last_update: Utc::now(),
         })
     }
 
@@ -387,9 +392,10 @@ impl State {
         TimeDelta::milliseconds(((1.0 - speed_up) * 800.0) as i64)
     }
 
-    fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
+    fn handle_key(&mut self, code: KeyCode, is_pressed: bool) {
         match (code, is_pressed) {
-            (KeyCode::Escape, true) => event_loop.exit(),
+            (KeyCode::Escape, true) => self.is_paused = !self.is_paused,
+            (KeyCode::KeyP, true) => self.is_paused = !self.is_paused,
             (KeyCode::ArrowUp, true) => {
                 if let Some(piece) = self.moving_piece {
                     let updated = Piece {
@@ -497,17 +503,25 @@ impl State {
     fn handle_mouse_moved(&mut self, x: f64, y: f64) {}
 
     fn update(&mut self) {
+        let now = Utc::now();
+        let time_passed = now.signed_duration_since(self.time_of_last_update);
+        self.time_of_last_update = now;
+
         if self.is_game_over {
             return;
         }
+        if self.is_paused {
+            return;
+        }
+
+        self.time_since_last_move += time_passed;
+
         if self.level_progress >= self.rows_per_level {
             self.level_progress -= self.rows_per_level;
             self.level += 1;
         }
-        if let Some(ts) = self.time_of_next_move
-            && ts <= Utc::now()
-        {
-            self.time_of_next_move = Some(ts + self.time_between_moves());
+        if self.time_since_last_move >= self.time_between_moves() {
+            self.time_since_last_move -= self.time_between_moves();
 
             if let Some(piece) = self.moving_piece {
                 let updated = Piece {
@@ -528,7 +542,7 @@ impl State {
                 origin: Pos { x: 4, y: 1 },
             };
             self.moving_piece = Some(piece);
-            self.time_of_next_move = Some(Utc::now() + self.time_between_moves());
+            self.time_since_last_move = TimeDelta::zero();
 
             if self.piece_collides(piece) {
                 self.is_game_over = true;
@@ -727,10 +741,8 @@ impl ApplicationHandler<State> for App {
                 }
             }
             WindowEvent::Focused(focused) => {
-                if focused {
-                    log::info!("Gained focus!");
-                } else {
-                    log::info!("Lost focus!");
+                if !focused {
+                    state.is_paused = true;
                 }
             }
             WindowEvent::KeyboardInput {
@@ -741,7 +753,7 @@ impl ApplicationHandler<State> for App {
                         ..
                     },
                 ..
-            } => state.handle_key(event_loop, code, key_state.is_pressed()),
+            } => state.handle_key(code, key_state.is_pressed()),
             WindowEvent::CursorMoved { position, .. } => {
                 state.handle_mouse_moved(position.x, position.y)
             }
