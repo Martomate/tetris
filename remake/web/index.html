@@ -10,13 +10,20 @@
         padding: 0;
         margin: 0;
       }
+      html, body {
+        height: 100%;
+      }
       body {
-        text-align: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background-color: black;
       }
       canvas {
-        background-color: black;
         width: 320px;
         height: 640px;
+        outline: none;
+        border: 1px solid blue;
       }
     </style>
   </head>
