@@ -7,6 +7,10 @@ use std::{collections::HashMap, sync::Arc};
 use chrono::{DateTime, TimeDelta, Utc};
 use rand::Rng;
 use wgpu::util::DeviceExt;
+use wgpu_text::{
+    BrushBuilder, TextBrush,
+    glyph_brush::{HorizontalAlign, Layout, Section as TextSection, Text, ab_glyph::FontRef},
+};
 use winit::{
     application::ApplicationHandler,
     dpi,
@@ -24,11 +28,16 @@ use crate::{
     tile::{Tile, Vertex},
 };
 
+pub mod fonts {
+    pub static ARIAL_ROUNDED: &[u8] = include_bytes!("assets/Arial Rounded Bold.ttf");
+}
+
 pub struct State {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    scale_factor: f32,
     is_surface_configured: bool,
     render_pipeline: wgpu::RenderPipeline,
     window: Arc<Window>,
@@ -54,6 +63,8 @@ pub struct State {
 
     time_since_last_move: TimeDelta,
     time_of_last_update: DateTime<Utc>,
+
+    brush: TextBrush<FontRef<'static>>,
 }
 
 impl State {
@@ -111,6 +122,14 @@ impl State {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
+
+        let font = FontRef::try_from_slice(fonts::ARIAL_ROUNDED).unwrap();
+        let brush = BrushBuilder::using_font(font).build(
+            &device,
+            config.width,
+            config.height,
+            config.format,
+        );
 
         static ALL_PIECES: &[(char, &[u8])] = &[
             ('I', include_bytes!("assets/I.png")),
@@ -260,6 +279,7 @@ impl State {
             device,
             queue,
             config,
+            scale_factor: 1.0, // will be replaced
             is_surface_configured: false,
             render_pipeline,
             piece_vertex_buffers,
@@ -289,6 +309,8 @@ impl State {
             level_progress: 0,
             time_since_last_move: TimeDelta::zero(),
             time_of_last_update: Utc::now(),
+
+            brush,
         })
     }
 
@@ -298,6 +320,14 @@ impl State {
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
             self.is_surface_configured = true;
+
+            let font = FontRef::try_from_slice(fonts::ARIAL_ROUNDED).unwrap();
+            self.brush = BrushBuilder::using_font(font).build(
+                &self.device,
+                self.config.width,
+                self.config.height,
+                self.config.format,
+            );
         }
     }
 
@@ -381,12 +411,102 @@ impl State {
                 let buffer_len = spots.len() as u32 * 6;
                 render_pass.draw(0..buffer_len, 0..1);
             }
+
+            let mut sections = Vec::new();
+            let cyan_color = [0, 150, 150, 200].map(|c| c as f32 / 255.0);
+            let dark_red_color = [150, 0, 0, 255].map(|c| c as f32 / 255.0);
+            let centered_layout = Layout::default().h_align(HorizontalAlign::Center);
+
+            if !self.has_started {
+                sections.extend(
+                    self.make_text_with_outline(
+                        TextSection::default()
+                            .add_text(
+                                Text::new("Press\nSPACE")
+                                    .with_color(cyan_color)
+                                    .with_scale(60.0 * self.scale_factor),
+                            )
+                            .with_layout(centered_layout)
+                            .with_screen_position((
+                                self.config.width as f32 / 2.0,
+                                160.0 * self.scale_factor,
+                            )),
+                    ),
+                );
+            } else if self.is_game_over {
+                sections.extend(
+                    self.make_text_with_outline(
+                        TextSection::default()
+                            .add_text(
+                                Text::new("Game Over")
+                                    .with_color(dark_red_color)
+                                    .with_scale(60.0 * self.scale_factor),
+                            )
+                            .with_layout(centered_layout)
+                            .with_screen_position((
+                                self.config.width as f32 / 2.0,
+                                260.0 * self.scale_factor,
+                            )),
+                    ),
+                );
+            } else if self.is_paused {
+                sections.extend(
+                    self.make_text_with_outline(
+                        TextSection::default()
+                            .add_text(
+                                Text::new("Press P")
+                                    .with_color(cyan_color)
+                                    .with_scale(60.0 * self.scale_factor),
+                            )
+                            .with_layout(centered_layout)
+                            .with_screen_position((
+                                self.config.width as f32 / 2.0,
+                                160.0 * self.scale_factor,
+                            )),
+                    ),
+                );
+            }
+
+            self.brush
+                .queue(&self.device, &self.queue, sections)
+                .unwrap();
+
+            self.brush.draw(&mut render_pass);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())
+    }
+
+    fn make_text_with_outline<'f>(&self, section: TextSection<'f>) -> Vec<TextSection<'f>> {
+        let mut res = Vec::new();
+
+        let d: f32 = 2.0;
+
+        let (x, y) = section.screen_position;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if dx != 0 || dy != 0 {
+                    let text = section
+                        .text
+                        .iter()
+                        .map(|t| t.with_color([0.0, 0.0, 0.0, 1.0]))
+                        .collect();
+
+                    res.push(
+                        section
+                            .clone()
+                            .with_text(text)
+                            .with_screen_position((x + dx as f32 * d, y + dy as f32 * d)),
+                    );
+                }
+            }
+        }
+        res.push(section);
+
+        res
     }
 
     /// 800 ms (level 0) to 0 ms (max level), reducing faster in the beginning
@@ -679,6 +799,9 @@ impl ApplicationHandler<State> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                state.scale_factor = scale_factor as f32;
+            }
             WindowEvent::RedrawRequested => {
                 state.update();
                 match state.render() {
