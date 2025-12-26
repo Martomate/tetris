@@ -11,7 +11,7 @@ You need to install [Java](https://www.java.com) and [Task](https://taskfile.dev
 
 ## Web version
 
-I intend to remake this game in Rust so that it can run on the web. It will then be available on my website for anyone to play. Stay tuned :)
+The game is now available [here](https://martomate.com/games/martomate/play)! Some features are not ported yet, but the main functionality should work.
 
 ## Images
 
@@ -21,4 +21,4 @@ I intend to remake this game in Rust so that it can run on the web. It will then
 
 ### Tetris game
 
-<img width="490" height="652" alt="Screenshot 2025-12-19 at 10 31 09" src="https://github.com/user-attachments/assets/e265e16e-06bd-46ba-bfab-ba95c56ff116" />
+<img width="490" height="652" alt="Gameplay" src="https://github.com/user-attachments/assets/e265e16e-06bd-46ba-bfab-ba95c56ff116" />
