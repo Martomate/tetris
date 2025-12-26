@@ -32,8 +32,10 @@
     <canvas id="canvas"></canvas>
     <script type="module">
       import init from "./game/tetris.js";
-      init().then(() => {
-        console.log("WASM Loaded");
+      init().catch((error) => {
+        if (!error.message.startsWith("Using exceptions for control flow,")) {
+          throw error;
+        }
       });
     </script>
   </body>
