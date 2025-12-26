@@ -1,3 +1,4 @@
+use anyhow::Context;
 use image::GenericImageView;
 
 pub struct Texture {
@@ -14,7 +15,7 @@ impl Texture {
         bytes: &[u8],
         label: &str,
     ) -> anyhow::Result<Self> {
-        let img = image::load_from_memory(bytes)?;
+        let img = image::load_from_memory(bytes).context("loading image bytes")?;
         Self::from_image(device, queue, &img, Some(label))
     }
 

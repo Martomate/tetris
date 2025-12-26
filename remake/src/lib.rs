@@ -1,15 +1,19 @@
 mod game;
+mod renderer;
 mod texture;
 mod tile;
 
 use std::{collections::HashMap, sync::Arc};
 
+use anyhow::Context;
 use chrono::{DateTime, TimeDelta, Utc};
 use rand::Rng;
 use wgpu::util::DeviceExt;
 use wgpu_text::{
     BrushBuilder, TextBrush,
-    glyph_brush::{HorizontalAlign, Layout, Section as TextSection, Text, ab_glyph::FontRef},
+    glyph_brush::{
+        FontId, HorizontalAlign, Layout, Section as TextSection, Text, ab_glyph::FontRef,
+    },
 };
 use winit::{
     application::ApplicationHandler,
@@ -30,6 +34,8 @@ use crate::{
 
 pub mod fonts {
     pub static ARIAL_ROUNDED: &[u8] = include_bytes!("assets/Arial Rounded Bold.ttf");
+
+    pub const ALL_FONTS: [&[u8]; 1] = [ARIAL_ROUNDED];
 }
 
 pub struct State {
@@ -41,12 +47,10 @@ pub struct State {
     is_surface_configured: bool,
     render_pipeline: wgpu::RenderPipeline,
     window: Arc<Window>,
-    clear_color: wgpu::Color,
 
     board: Board,
 
     piece_vertex_buffers: HashMap<char, wgpu::Buffer>,
-    piece_textures: HashMap<char, texture::Texture>,
     piece_texture_bind_groups: HashMap<char, wgpu::BindGroup>,
     shapes: HashMap<char, Shape>,
 
@@ -64,7 +68,8 @@ pub struct State {
     time_since_last_move: TimeDelta,
     time_of_last_update: DateTime<Utc>,
 
-    brush: TextBrush<FontRef<'static>>,
+    fonts: HashMap<&'static [u8], FontId>,
+    text_brush: TextBrush<FontRef<'static>>,
 }
 
 impl State {
@@ -79,7 +84,9 @@ impl State {
             ..Default::default()
         });
 
-        let surface = instance.create_surface(window.clone()).unwrap();
+        let surface = instance
+            .create_surface(window.clone())
+            .context("creating surface")?;
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -123,33 +130,20 @@ impl State {
             desired_maximum_frame_latency: 2,
         };
 
-        let font = FontRef::try_from_slice(fonts::ARIAL_ROUNDED).unwrap();
-        let brush = BrushBuilder::using_font(font).build(
+        let mut fonts = HashMap::new();
+        let mut font_refs = Vec::new();
+
+        for (id, &font_bytes) in fonts::ALL_FONTS.iter().enumerate() {
+            fonts.insert(font_bytes, FontId(id));
+            font_refs.push(FontRef::try_from_slice(font_bytes).unwrap());
+        }
+
+        let text_brush = BrushBuilder::using_fonts(font_refs).build(
             &device,
             config.width,
             config.height,
             config.format,
         );
-
-        static ALL_PIECES: &[(char, &[u8])] = &[
-            ('I', include_bytes!("assets/I.png")),
-            ('J', include_bytes!("assets/J.png")),
-            ('L', include_bytes!("assets/L.png")),
-            ('O', include_bytes!("assets/O.png")),
-            ('S', include_bytes!("assets/S.png")),
-            ('T', include_bytes!("assets/T.png")),
-            ('Z', include_bytes!("assets/Z.png")),
-        ];
-
-        let piece_textures = ALL_PIECES
-            .iter()
-            .map(|(ch, texture_bytes)| {
-                (
-                    *ch,
-                    texture::Texture::from_bytes(&device, &queue, texture_bytes, "piece").unwrap(),
-                )
-            })
-            .collect::<HashMap<char, texture::Texture>>();
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -174,92 +168,53 @@ impl State {
                 label: Some("texture_bind_group_layout"),
             });
 
-        let piece_texture_bind_groups = piece_textures
-            .iter()
-            .map(|(letter, tex)| {
-                (
-                    *letter,
-                    device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        layout: &texture_bind_group_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&tex.view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&tex.sampler),
-                            },
-                        ],
-                        label: Some("diffuse_bind_group"),
-                    }),
-                )
-            })
-            .collect();
+        let render_pipeline =
+            renderer::create_render_pipeline(&device, config.format, &[&texture_bind_group_layout]);
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
+        static ALL_PIECES: &[(char, &[u8])] = &[
+            ('I', include_bytes!("assets/I.png")),
+            ('J', include_bytes!("assets/J.png")),
+            ('L', include_bytes!("assets/L.png")),
+            ('O', include_bytes!("assets/O.png")),
+            ('S', include_bytes!("assets/S.png")),
+            ('T', include_bytes!("assets/T.png")),
+            ('Z', include_bytes!("assets/Z.png")),
+        ];
 
-        let render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&texture_bind_group_layout],
-                immediate_size: 0,
-            });
+        let mut piece_texture_bind_groups = HashMap::new();
+        let mut piece_vertex_buffers = HashMap::new();
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        for &(ch, texture_bytes) in ALL_PIECES {
+            let tex = texture::Texture::from_bytes(&device, &queue, texture_bytes, "piece")
+                .context("creating piece texture")?;
 
-        let piece_vertex_buffers = piece_textures
-            .keys()
-            .map(|l| {
-                (
-                    *l,
-                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Vertex Buffer"),
-                        contents: &[0; Vertex::desc().array_stride as usize * 6 * 10 * 20],
-                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    }),
-                )
-            })
-            .collect::<HashMap<char, wgpu::Buffer>>();
+            piece_texture_bind_groups.insert(
+                ch,
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout: &texture_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&tex.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&tex.sampler),
+                        },
+                    ],
+                    label: Some("diffuse_bind_group"),
+                }),
+            );
+
+            piece_vertex_buffers.insert(
+                ch,
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Vertex Buffer"),
+                    contents: &[0; Vertex::desc().array_stride as usize * 6 * 10 * 20],
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                }),
+            );
+        }
 
         let shapes: HashMap<char, Shape> = [
             ('O', [(0, -1), (0, 0), (1, 0), (1, -1)]),
@@ -284,16 +239,9 @@ impl State {
             render_pipeline,
             piece_vertex_buffers,
             window,
-            clear_color: wgpu::Color {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 1.0,
-            },
 
             board: Board::new(10, 20),
 
-            piece_textures,
             piece_texture_bind_groups,
             shapes,
 
@@ -310,7 +258,8 @@ impl State {
             time_since_last_move: TimeDelta::zero(),
             time_of_last_update: Utc::now(),
 
-            brush,
+            fonts,
+            text_brush,
         })
     }
 
@@ -321,12 +270,10 @@ impl State {
             self.surface.configure(&self.device, &self.config);
             self.is_surface_configured = true;
 
-            let font = FontRef::try_from_slice(fonts::ARIAL_ROUNDED).unwrap();
-            self.brush = BrushBuilder::using_font(font).build(
-                &self.device,
-                self.config.width,
-                self.config.height,
-                self.config.format,
+            self.text_brush.resize_view(
+                self.config.width as f32,
+                self.config.height as f32,
+                &self.queue,
             );
         }
     }
@@ -338,11 +285,10 @@ impl State {
             return Ok(());
         }
 
-        let output = self.surface.get_current_texture()?;
+        self.update_text();
 
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let frame = self.surface.get_current_texture()?;
+        let view = frame.texture.create_view(&Default::default());
 
         let mut encoder = self
             .device
@@ -358,7 +304,7 @@ impl State {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -369,12 +315,71 @@ impl State {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
+            self.render_board(&mut render_pass);
+            self.render_text(&mut render_pass);
+        }
 
-            let tw = 2.0 / self.board.width as f32;
-            let th = 2.0 / self.board.height as f32;
+        self.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
 
-            for (letter, bind_group) in &self.piece_texture_bind_groups {
-                let mut spots: Vec<(u8, u8)> = Vec::new();
+        Ok(())
+    }
+
+    fn update_text(&mut self) {
+        let text_sections = self.create_text_sections();
+        if let Err(err) = self
+            .text_brush
+            .queue(&self.device, &self.queue, text_sections)
+        {
+            log::error!("Failed to update text: {}", err);
+        }
+    }
+
+    fn render_text(&mut self, render_pass: &mut wgpu::RenderPass<'_>) {
+        self.text_brush.draw(render_pass);
+    }
+
+    fn create_text_sections(&self) -> Vec<TextSection<'static>> {
+        let mut sections = Vec::new();
+
+        let cyan_color = [0, 150, 150, 200].map(|c| c as f32 / 255.0);
+        let dark_red_color = [150, 0, 0, 255].map(|c| c as f32 / 255.0);
+
+        let big_text = if !self.has_started {
+            Some((("Press\nSPACE", cyan_color, 60.0), 160.0))
+        } else if self.is_game_over {
+            Some((("Game Over", dark_red_color, 60.0), 260.0))
+        } else if self.is_paused {
+            Some((("Press P", cyan_color, 60.0), 160.0))
+        } else {
+            None
+        };
+
+        if let Some(((text, color, scale), y_pos)) = big_text {
+            let main_section = TextSection::default()
+                .add_text(
+                    Text::new(text)
+                        .with_color(color)
+                        .with_scale(scale * self.scale_factor)
+                        .with_font_id(self.fonts[fonts::ARIAL_ROUNDED]),
+                )
+                .with_layout(Layout::default().h_align(HorizontalAlign::Center))
+                .with_screen_position((self.config.width as f32 / 2.0, y_pos * self.scale_factor));
+
+            sections.extend(self.make_text_with_outline(main_section));
+        }
+
+        sections
+    }
+
+    fn render_board(&mut self, render_pass: &mut wgpu::RenderPass<'_>) {
+        let tw = 2.0 / self.board.width as f32;
+        let th = 2.0 / self.board.height as f32;
+
+        for (letter, bind_group) in &self.piece_texture_bind_groups {
+            let mut spots: Vec<(u8, u8)> = Vec::new();
+
+            if !self.is_paused || self.is_game_over {
                 for (y, row) in self.board.tiles.iter().enumerate() {
                     for (x, l) in row.iter().enumerate() {
                         if l == letter {
@@ -382,102 +387,35 @@ impl State {
                         }
                     }
                 }
+            }
 
-                if let Some(piece) = self.moving_piece.filter(|p| p.letter == *letter) {
-                    for pos in self.shapes[letter].rotated(piece.rotation).at(piece.origin) {
-                        if self.board.contains(pos) {
-                            spots.push((pos.x as u8, pos.y as u8));
-                        }
+            if let Some(piece) = self.moving_piece.filter(|p| p.letter == *letter) {
+                for pos in self.shapes[letter].rotated(piece.rotation).at(piece.origin) {
+                    if self.board.contains(pos) {
+                        spots.push((pos.x as u8, pos.y as u8));
                     }
                 }
-
-                let tiles = spots
-                    .iter()
-                    .map(|&(x, y)| {
-                        Tile::new(tw, th).at(tw * x as f32 - 1.0, 1.0 - th * (y + 1) as f32)
-                    })
-                    .collect::<Vec<_>>();
-
-                let vertices = tiles.iter().flat_map(|t| t.vertices).collect::<Vec<_>>();
-
-                self.queue.write_buffer(
-                    &self.piece_vertex_buffers[letter],
-                    0,
-                    bytemuck::cast_slice(&vertices),
-                );
-                render_pass.set_bind_group(0, bind_group, &[]);
-                render_pass.set_vertex_buffer(0, self.piece_vertex_buffers[letter].slice(..));
-
-                let buffer_len = spots.len() as u32 * 6;
-                render_pass.draw(0..buffer_len, 0..1);
             }
 
-            let mut sections = Vec::new();
-            let cyan_color = [0, 150, 150, 200].map(|c| c as f32 / 255.0);
-            let dark_red_color = [150, 0, 0, 255].map(|c| c as f32 / 255.0);
-            let centered_layout = Layout::default().h_align(HorizontalAlign::Center);
+            let tiles = spots
+                .iter()
+                .map(|&(x, y)| Tile::new(tw, th).at(tw * x as f32 - 1.0, 1.0 - th * (y + 1) as f32))
+                .collect::<Vec<_>>();
 
-            if !self.has_started {
-                sections.extend(
-                    self.make_text_with_outline(
-                        TextSection::default()
-                            .add_text(
-                                Text::new("Press\nSPACE")
-                                    .with_color(cyan_color)
-                                    .with_scale(60.0 * self.scale_factor),
-                            )
-                            .with_layout(centered_layout)
-                            .with_screen_position((
-                                self.config.width as f32 / 2.0,
-                                160.0 * self.scale_factor,
-                            )),
-                    ),
-                );
-            } else if self.is_game_over {
-                sections.extend(
-                    self.make_text_with_outline(
-                        TextSection::default()
-                            .add_text(
-                                Text::new("Game Over")
-                                    .with_color(dark_red_color)
-                                    .with_scale(60.0 * self.scale_factor),
-                            )
-                            .with_layout(centered_layout)
-                            .with_screen_position((
-                                self.config.width as f32 / 2.0,
-                                260.0 * self.scale_factor,
-                            )),
-                    ),
-                );
-            } else if self.is_paused {
-                sections.extend(
-                    self.make_text_with_outline(
-                        TextSection::default()
-                            .add_text(
-                                Text::new("Press P")
-                                    .with_color(cyan_color)
-                                    .with_scale(60.0 * self.scale_factor),
-                            )
-                            .with_layout(centered_layout)
-                            .with_screen_position((
-                                self.config.width as f32 / 2.0,
-                                160.0 * self.scale_factor,
-                            )),
-                    ),
-                );
-            }
+            let vertices = tiles.iter().flat_map(|t| t.vertices).collect::<Vec<_>>();
 
-            self.brush
-                .queue(&self.device, &self.queue, sections)
-                .unwrap();
+            self.queue.write_buffer(
+                &self.piece_vertex_buffers[letter],
+                0,
+                bytemuck::cast_slice(&vertices),
+            );
 
-            self.brush.draw(&mut render_pass);
+            render_pass.set_bind_group(0, bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.piece_vertex_buffers[letter].slice(..));
+
+            let buffer_len = spots.len() as u32 * 6;
+            render_pass.draw(0..buffer_len, 0..1);
         }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
-
-        Ok(())
     }
 
     fn make_text_with_outline<'f>(&self, section: TextSection<'f>) -> Vec<TextSection<'f>> {
@@ -636,8 +574,6 @@ impl State {
         self.level_progress += removed_rows;
     }
 
-    fn handle_mouse_moved(&mut self, x: f64, y: f64) {}
-
     fn update(&mut self) {
         let now = Utc::now();
         let time_passed = now.signed_duration_since(self.time_of_last_update);
@@ -674,9 +610,11 @@ impl State {
                 }
             }
         }
-        if self.moving_piece.is_none() && self.next_shape.is_some() {
+        if self.moving_piece.is_none()
+            && let Some(letter) = self.next_shape.take()
+        {
             let piece = Piece {
-                letter: self.next_shape.take().unwrap(),
+                letter,
                 rotation: 0,
                 origin: Pos { x: 4, y: 1 },
             };
@@ -716,7 +654,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(#[cfg(target_arch = "wasm32")] event_loop: &EventLoop<State>) -> Self {
+    pub fn new(#[allow(unused)] event_loop: &EventLoop<State>) -> Self {
         #[cfg(target_arch = "wasm32")]
         let proxy = Some(event_loop.create_proxy());
         Self {
@@ -829,9 +767,6 @@ impl ApplicationHandler<State> for App {
                     },
                 ..
             } => state.handle_key(code, key_state.is_pressed()),
-            WindowEvent::CursorMoved { position, .. } => {
-                state.handle_mouse_moved(position.x, position.y)
-            }
             _ => {}
         }
     }
@@ -848,10 +783,7 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     let event_loop = EventLoop::with_user_event().build()?;
-    let mut app = App::new(
-        #[cfg(target_arch = "wasm32")]
-        &event_loop,
-    );
+    let mut app = App::new(&event_loop);
     event_loop.run_app(&mut app)?;
 
     Ok(())
