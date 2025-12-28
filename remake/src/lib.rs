@@ -1,5 +1,4 @@
 mod game;
-mod renderer;
 mod texture;
 mod tile;
 
@@ -29,7 +28,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::{
     game::{Board, Piece, Pos, Shape},
-    tile::{Tile, Vertex},
+    tile::{Tile, TileRenderer, Vertex},
 };
 
 pub mod fonts {
@@ -39,20 +38,20 @@ pub mod fonts {
 }
 
 pub struct State {
+    window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     scale_factor: f32,
     is_surface_configured: bool,
-    render_pipeline: wgpu::RenderPipeline,
-    window: Arc<Window>,
 
-    board: Board,
-
-    piece_vertex_buffers: HashMap<char, wgpu::Buffer>,
+    tile_renderer: TileRenderer,
+    piece_vertex_buffer: wgpu::Buffer,
     piece_texture_bind_groups: HashMap<char, wgpu::BindGroup>,
     shapes: HashMap<char, Shape>,
+
+    board: Board,
 
     has_started: bool,
     is_game_over: bool,
@@ -145,31 +144,7 @@ impl State {
             config.format,
         );
 
-        let texture_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-                label: Some("texture_bind_group_layout"),
-            });
-
-        let render_pipeline =
-            renderer::create_render_pipeline(&device, config.format, &[&texture_bind_group_layout]);
+        let tile_renderer = TileRenderer::new(&device, config.format);
 
         static ALL_PIECES: &[(char, &[u8])] = &[
             ('I', include_bytes!("assets/I.png")),
@@ -182,39 +157,19 @@ impl State {
         ];
 
         let mut piece_texture_bind_groups = HashMap::new();
-        let mut piece_vertex_buffers = HashMap::new();
 
         for &(ch, texture_bytes) in ALL_PIECES {
             let tex = texture::Texture::from_bytes(&device, &queue, texture_bytes, "piece")
                 .context("creating piece texture")?;
 
-            piece_texture_bind_groups.insert(
-                ch,
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    layout: &texture_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&tex.view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&tex.sampler),
-                        },
-                    ],
-                    label: Some("diffuse_bind_group"),
-                }),
-            );
-
-            piece_vertex_buffers.insert(
-                ch,
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Vertex Buffer"),
-                    contents: &[0; Vertex::desc().array_stride as usize * 6 * 10 * 20],
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                }),
-            );
+            piece_texture_bind_groups.insert(ch, tile_renderer.create_bind_group(&device, &tex));
         }
+
+        let piece_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: &[0; Vertex::desc().array_stride as usize * 6 * 10 * 20],
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
 
         let shapes: HashMap<char, Shape> = [
             ('O', [(0, -1), (0, 0), (1, 0), (1, -1)]),
@@ -230,20 +185,20 @@ impl State {
         .collect();
 
         Ok(Self {
+            window,
             surface,
             device,
             queue,
             config,
             scale_factor: 1.0, // will be replaced
             is_surface_configured: false,
-            render_pipeline,
-            piece_vertex_buffers,
-            window,
 
-            board: Board::new(10, 20),
-
+            tile_renderer,
+            piece_vertex_buffer,
             piece_texture_bind_groups,
             shapes,
+
+            board: Board::new(10, 20),
 
             has_started: false,
             is_game_over: false,
@@ -314,7 +269,6 @@ impl State {
                 multiview_mask: None,
             });
 
-            render_pass.set_pipeline(&self.render_pipeline);
             self.render_board(&mut render_pass);
             self.render_text(&mut render_pass);
         }
@@ -373,49 +327,70 @@ impl State {
     }
 
     fn render_board(&mut self, render_pass: &mut wgpu::RenderPass<'_>) {
-        let tw = 2.0 / self.board.width as f32;
-        let th = 2.0 / self.board.height as f32;
+        render_pass.set_pipeline(&self.tile_renderer.pipeline);
+        render_pass.set_vertex_buffer(0, self.piece_vertex_buffer.slice(..));
+
+        let tile_width = 2.0 / self.board.width as f32;
+        let tile_height = 2.0 / self.board.height as f32;
+
+        let mut vertices_written: u32 = 0;
 
         for (letter, bind_group) in &self.piece_texture_bind_groups {
-            let mut spots: Vec<(u8, u8)> = Vec::new();
+            let vertices = self.create_tile_vertices(tile_width, tile_height, letter);
 
-            if !self.is_paused || self.is_game_over {
-                for (y, row) in self.board.tiles.iter().enumerate() {
-                    for (x, l) in row.iter().enumerate() {
-                        if l == letter {
-                            spots.push((x as u8, y as u8));
-                        }
-                    }
-                }
-            }
-
-            if let Some(piece) = self.moving_piece.filter(|p| p.letter == *letter) {
-                for pos in self.shapes[letter].rotated(piece.rotation).at(piece.origin) {
-                    if self.board.contains(pos) {
-                        spots.push((pos.x as u8, pos.y as u8));
-                    }
-                }
-            }
-
-            let tiles = spots
-                .iter()
-                .map(|&(x, y)| Tile::new(tw, th).at(tw * x as f32 - 1.0, 1.0 - th * (y + 1) as f32))
-                .collect::<Vec<_>>();
-
-            let vertices = tiles.iter().flat_map(|t| t.vertices).collect::<Vec<_>>();
+            let buffer_offset = vertices_written as u64 * Vertex::desc().array_stride;
 
             self.queue.write_buffer(
-                &self.piece_vertex_buffers[letter],
-                0,
+                &self.piece_vertex_buffer,
+                buffer_offset,
                 bytemuck::cast_slice(&vertices),
             );
 
-            render_pass.set_bind_group(0, bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.piece_vertex_buffers[letter].slice(..));
+            let num_vertices = vertices.len() as u32;
 
-            let buffer_len = spots.len() as u32 * 6;
-            render_pass.draw(0..buffer_len, 0..1);
+            render_pass.set_bind_group(0, bind_group, &[]);
+            render_pass.draw(vertices_written..vertices_written + num_vertices, 0..1);
+
+            vertices_written += num_vertices;
         }
+    }
+
+    fn create_tile_vertices(
+        &self,
+        tile_width: f32,
+        tile_height: f32,
+        letter: &char,
+    ) -> Vec<Vertex> {
+        let mut spots: Vec<(u8, u8)> = Vec::new();
+
+        if !self.is_paused || self.is_game_over {
+            for (y, row) in self.board.tiles.iter().enumerate() {
+                for (x, l) in row.iter().enumerate() {
+                    if l == letter {
+                        spots.push((x as u8, y as u8));
+                    }
+                }
+            }
+        }
+
+        if let Some(piece) = self.moving_piece.filter(|p| p.letter == *letter) {
+            for pos in self.shapes[letter].rotated(piece.rotation).at(piece.origin) {
+                if self.board.contains(pos) {
+                    spots.push((pos.x as u8, pos.y as u8));
+                }
+            }
+        }
+
+        let tiles = spots
+            .iter()
+            .map(|&(x, y)| {
+                let tx = tile_width * x as f32 - 1.0;
+                let ty = 1.0 - tile_height * (y + 1) as f32;
+                Tile::new(tile_width, tile_height).at(tx, ty)
+            })
+            .collect::<Vec<_>>();
+
+        tiles.iter().flat_map(|t| t.vertices).collect::<Vec<_>>()
     }
 
     fn make_text_with_outline<'f>(&self, section: TextSection<'f>) -> Vec<TextSection<'f>> {
