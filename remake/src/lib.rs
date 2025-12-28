@@ -56,14 +56,20 @@ pub struct State {
     piece_texture_bind_groups: HashMap<char, wgpu::BindGroup>,
 
     board: Board,
-    has_started: bool,
-    is_game_over: bool,
-    is_paused: bool,
+    state: GameState,
     shapes: HashMap<char, Shape>,
     moving_piece_timer: Timer,
     moving_piece: Option<Piece>,
     next_shape: Option<char>,
     progress: GameProgress,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum GameState {
+    NotStarted,
+    Running,
+    Paused,
+    GameOver,
 }
 
 impl State {
@@ -198,10 +204,7 @@ impl State {
             shapes,
 
             board: Board::new(10, 20),
-
-            has_started: false,
-            is_game_over: false,
-            is_paused: false,
+            state: GameState::NotStarted,
             moving_piece: None,
             next_shape: None,
 
@@ -295,14 +298,19 @@ impl State {
         let cyan_color = [0, 150, 150, 200].map(|c| c as f32 / 255.0);
         let dark_red_color = [150, 0, 0, 255].map(|c| c as f32 / 255.0);
 
-        let big_text = if !self.has_started {
-            Some((("Press\nSPACE", cyan_color, 60.0), 160.0))
-        } else if self.is_game_over {
-            Some((("Game Over", dark_red_color, 60.0), 260.0))
-        } else if self.is_paused {
-            Some((("Press P", cyan_color, 60.0), 160.0))
-        } else {
-            None
+        let big_text = match self.state {
+            GameState::NotStarted => {
+                Some((("Press\nSPACE", cyan_color, 60.0), 160.0))
+            }
+            GameState::GameOver => {
+                Some((("Game Over", dark_red_color, 60.0), 260.0))
+            }
+            GameState::Paused => {
+                Some((("Press P", cyan_color, 60.0), 160.0))
+            }
+            GameState::Running => {
+                None
+            }
         };
 
         if let Some(((text, color, scale), y_pos)) = big_text {
@@ -354,7 +362,7 @@ impl State {
     fn create_tile_vertices(&self, tile_width: f32, tile_height: f32, letter: char) -> Vec<Vertex> {
         let mut spots: Vec<(u8, u8)> = Vec::new();
 
-        if !self.is_paused || self.is_game_over {
+        if self.state != GameState::Paused {
             for (y, row) in self.board.tiles.iter().enumerate() {
                 for (x, &l) in row.iter().enumerate() {
                     if l == letter {
@@ -365,8 +373,8 @@ impl State {
         }
 
         if letter == 'G'
-            && !self.is_paused
-            && !self.is_game_over
+            && self.state != GameState::Paused
+            && self.state != GameState::GameOver
             && let Some(piece) = self.moving_piece
         {
             let mut piece = piece;
@@ -454,15 +462,22 @@ impl State {
     fn handle_key(&mut self, code: KeyCode, is_pressed: bool) {
         match (code, is_pressed) {
             (KeyCode::Escape, true) => {
-                self.is_paused = !self.is_paused;
+                self.state = match self.state {
+                    GameState::Running => GameState::Paused,
+                    GameState::Paused => GameState::Running,
+                    state => state
+                };
             }
             (KeyCode::KeyP, true) => {
-                self.is_paused = !self.is_paused;
+                self.state = match self.state {
+                    GameState::Running => GameState::Paused,
+                    GameState::Paused => GameState::Running,
+                    state => state
+                };
             }
             (KeyCode::Space, true) => {
-                if !self.has_started {
-                    self.has_started = true;
-                    self.is_paused = false;
+                if self.state == GameState::NotStarted {
+                    self.state = GameState::Running;
                 }
             }
             (KeyCode::ArrowUp, true) => {
@@ -570,13 +585,7 @@ impl State {
     }
 
     fn update(&mut self, time_passed: TimeDelta) {
-        if !self.has_started {
-            return;
-        }
-        if self.is_game_over {
-            return;
-        }
-        if self.is_paused {
+        if self.state != GameState::Running {
             return;
         }
 
@@ -606,7 +615,7 @@ impl State {
             self.moving_piece_timer.reset();
 
             if self.piece_collides(piece) {
-                self.is_game_over = true;
+                self.state = GameState::GameOver;
             }
         }
         if self.next_shape.is_none() {
@@ -739,8 +748,8 @@ impl ApplicationHandler<State> for App {
                 }
             }
             WindowEvent::Focused(focused) => {
-                if !focused && state.has_started {
-                    state.is_paused = true;
+                if !focused && state.state != GameState::NotStarted {
+                    state.state = GameState::Paused;
                 }
             }
             WindowEvent::KeyboardInput {
