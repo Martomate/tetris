@@ -28,7 +28,7 @@ use winit::{
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    game::{Board, GameProgress, Piece, Pos, Shape},
+    game::{Board, GameProgress, GameState, Piece, Pos, Shape},
     tile::{Tile, TileRenderer, Vertex},
     time::{Clock, Timer},
 };
@@ -62,14 +62,6 @@ pub struct State {
     moving_piece: Option<Piece>,
     next_shape: Option<char>,
     progress: GameProgress,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum GameState {
-    NotStarted,
-    Running,
-    Paused,
-    GameOver,
 }
 
 impl State {
@@ -299,18 +291,10 @@ impl State {
         let dark_red_color = [150, 0, 0, 255].map(|c| c as f32 / 255.0);
 
         let big_text = match self.state {
-            GameState::NotStarted => {
-                Some((("Press\nSPACE", cyan_color, 60.0), 160.0))
-            }
-            GameState::GameOver => {
-                Some((("Game Over", dark_red_color, 60.0), 260.0))
-            }
-            GameState::Paused => {
-                Some((("Press P", cyan_color, 60.0), 160.0))
-            }
-            GameState::Running => {
-                None
-            }
+            GameState::NotStarted => Some((("Press\nSPACE", cyan_color, 60.0), 160.0)),
+            GameState::GameOver => Some((("Game Over", dark_red_color, 60.0), 260.0)),
+            GameState::Paused => Some((("Press P", cyan_color, 60.0), 160.0)),
+            GameState::Running => None,
         };
 
         if let Some(((text, color, scale), y_pos)) = big_text {
@@ -379,19 +363,13 @@ impl State {
         {
             let mut piece = piece;
             loop {
-                let updated = Piece {
-                    origin: piece.origin + Pos::new(0, 1),
-                    ..piece
-                };
+                let updated = piece.moved(Pos::new(0, 1));
                 if self.piece_collides(updated) {
                     break;
                 }
                 piece = updated;
             }
-            for pos in self.shapes[&piece.letter]
-                .rotated(piece.rotation)
-                .at(piece.origin)
-            {
+            for pos in piece.tiles(&self.shapes) {
                 if self.board.contains(pos) {
                     spots.push((pos.x as u8, pos.y as u8));
                 }
@@ -399,10 +377,7 @@ impl State {
         }
 
         if let Some(piece) = self.moving_piece.filter(|p| p.letter == letter) {
-            for pos in self.shapes[&piece.letter]
-                .rotated(piece.rotation)
-                .at(piece.origin)
-            {
+            for pos in piece.tiles(&self.shapes) {
                 if self.board.contains(pos) {
                     spots.push((pos.x as u8, pos.y as u8));
                 }
@@ -465,14 +440,14 @@ impl State {
                 self.state = match self.state {
                     GameState::Running => GameState::Paused,
                     GameState::Paused => GameState::Running,
-                    state => state
+                    state => state,
                 };
             }
             (KeyCode::KeyP, true) => {
                 self.state = match self.state {
                     GameState::Running => GameState::Paused,
                     GameState::Paused => GameState::Running,
-                    state => state
+                    state => state,
                 };
             }
             (KeyCode::Space, true) => {
@@ -481,107 +456,54 @@ impl State {
                 }
             }
             (KeyCode::ArrowUp, true) => {
-                if let Some(piece) = self.moving_piece {
-                    let updated = Piece {
-                        rotation: (piece.rotation + 1) % 4,
-                        ..piece
-                    };
-                    if !self.piece_collides(updated) {
-                        self.moving_piece = Some(updated);
-                    }
+                if let Some(piece) = self.try_update_moving_piece(|p| p.rotated_cw()) {
+                    self.moving_piece = Some(piece);
                 }
             }
             (KeyCode::ArrowLeft, true) => {
-                if let Some(piece) = self.moving_piece {
-                    let updated = Piece {
-                        origin: piece.origin + Pos::new(-1, 0),
-                        ..piece
-                    };
-                    if !self.piece_collides(updated) {
-                        self.moving_piece = Some(updated);
-                    }
+                if let Some(piece) = self.try_update_moving_piece(|p| p.moved(Pos::new(-1, 0))) {
+                    self.moving_piece = Some(piece);
                 }
             }
             (KeyCode::ArrowDown, true) => {
-                if let Some(piece) = self.moving_piece {
-                    let updated = Piece {
-                        origin: piece.origin + Pos::new(0, 1),
-                        ..piece
-                    };
-                    if !self.piece_collides(updated) {
-                        self.moving_piece = Some(updated);
-                    }
+                if let Some(piece) = self.try_update_moving_piece(|p| p.moved(Pos::new(0, 1))) {
+                    self.moving_piece = Some(piece);
                 }
             }
             (KeyCode::ArrowRight, true) => {
-                if let Some(piece) = self.moving_piece {
-                    let updated = Piece {
-                        origin: piece.origin + Pos::new(1, 0),
-                        ..piece
-                    };
-                    if !self.piece_collides(updated) {
-                        self.moving_piece = Some(updated);
-                    }
+                if let Some(piece) = self.try_update_moving_piece(|p| p.moved(Pos::new(1, 0))) {
+                    self.moving_piece = Some(piece);
                 }
             }
             (KeyCode::KeyD, true) => {
-                while let Some(piece) = self.moving_piece {
-                    let updated = Piece {
-                        origin: piece.origin + Pos::new(0, 1),
-                        ..piece
-                    };
-                    if !self.piece_collides(updated) {
-                        self.moving_piece = Some(updated);
-                    } else {
-                        self.handle_dropped_piece();
-                        break;
-                    }
+                while let Some(piece) = self.try_update_moving_piece(|p| p.moved(Pos::new(0, 1))) {
+                    self.moving_piece = Some(piece);
                 }
+
+                self.handle_dropped_piece();
             }
             _ => {}
         }
     }
 
+    fn try_update_moving_piece(&mut self, update_fn: impl FnOnce(Piece) -> Piece) -> Option<Piece> {
+        if let Some(piece) = self.moving_piece {
+            let updated = update_fn(piece);
+            if !self.piece_collides(updated) {
+                return Some(updated);
+            }
+        }
+        None
+    }
+
     fn handle_dropped_piece(&mut self) {
         if let Some(piece) = self.moving_piece.take() {
-            for pos in self.shapes[&piece.letter]
-                .rotated(piece.rotation)
-                .at(piece.origin)
-            {
+            for pos in piece.tiles(&self.shapes) {
                 self.board.set_tile(pos, piece.letter);
             }
         }
 
-        self.remove_full_rows();
-    }
-
-    fn remove_full_rows(&mut self) {
-        let mut removed_rows = 0;
-        for y in (0..self.board.height).rev() {
-            let mut full_row = true;
-            for x in 0..self.board.width {
-                if self.board.get_tile(Pos::new(x as i8, y as i8)).is_none() {
-                    full_row = false;
-                    break;
-                }
-            }
-            if full_row {
-                removed_rows += 1;
-            } else {
-                for x in 0..self.board.width {
-                    if let Some(tile) = self.board.get_tile(Pos::new(x as i8, y as i8)) {
-                        self.board
-                            .set_tile(Pos::new(x as i8, (y + removed_rows) as i8), tile);
-                    }
-                }
-            }
-            if removed_rows > 0 {
-                for x in 0..self.board.width {
-                    self.board.clear_tile(Pos::new(x as i8, y as i8));
-                }
-            }
-        }
-        self.progress.add_rows(removed_rows);
+        self.progress.add_rows(self.board.remove_full_rows());
     }
 
     fn update(&mut self, time_passed: TimeDelta) {
@@ -591,26 +513,16 @@ impl State {
 
         self.moving_piece_timer.advance(time_passed);
         while self.moving_piece_timer.tick(self.time_between_moves()) {
-            if let Some(piece) = self.moving_piece {
-                let updated = Piece {
-                    origin: piece.origin + Pos::new(0, 1),
-                    ..piece
-                };
-                if !self.piece_collides(updated) {
-                    self.moving_piece = Some(updated);
-                } else {
-                    self.handle_dropped_piece();
-                }
+            if let Some(piece) = self.try_update_moving_piece(|p| p.moved(Pos::new(0, 1))) {
+                self.moving_piece = Some(piece);
+            } else {
+                self.handle_dropped_piece();
             }
         }
         if self.moving_piece.is_none()
             && let Some(letter) = self.next_shape.take()
         {
-            let piece = Piece {
-                letter,
-                rotation: 0,
-                origin: Pos { x: 4, y: 1 },
-            };
+            let piece = Piece::new(letter, 0, Pos { x: 4, y: 1 });
             self.moving_piece = Some(piece);
             self.moving_piece_timer.reset();
 
@@ -626,11 +538,8 @@ impl State {
     }
 
     fn piece_collides(&self, piece: Piece) -> bool {
-        let positions = self.shapes[&piece.letter]
-            .rotated(piece.rotation)
-            .at(piece.origin);
-
-        positions
+        piece
+            .tiles(&self.shapes)
             .iter()
             .any(|&pos| !self.board.contains(pos) || self.board.get_tile(pos).is_some())
     }

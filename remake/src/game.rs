@@ -1,4 +1,12 @@
-use std::ops::Add;
+use std::ops::{Add, Index};
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum GameState {
+    NotStarted,
+    Running,
+    Paused,
+    GameOver,
+}
 
 pub struct Board {
     pub tiles: Vec<Vec<char>>,
@@ -34,6 +42,34 @@ impl Board {
         }
         true
     }
+
+    pub fn remove_full_rows(&mut self) -> u8 {
+        let mut removed_rows = 0;
+        for y in (0..self.height).rev() {
+            let mut full_row = true;
+            for x in 0..self.width {
+                if self.get_tile(Pos::new(x as i8, y as i8)).is_none() {
+                    full_row = false;
+                    break;
+                }
+            }
+            if full_row {
+                removed_rows += 1;
+            } else {
+                for x in 0..self.width {
+                    if let Some(tile) = self.get_tile(Pos::new(x as i8, y as i8)) {
+                        self.set_tile(Pos::new(x as i8, (y + removed_rows) as i8), tile);
+                    }
+                }
+            }
+            if removed_rows > 0 {
+                for x in 0..self.width {
+                    self.clear_tile(Pos::new(x as i8, y as i8));
+                }
+            }
+        }
+        removed_rows
+    }
 }
 
 impl Board {
@@ -49,8 +85,35 @@ impl Board {
 #[derive(Clone, Copy)]
 pub struct Piece {
     pub letter: char,
-    pub rotation: u8,
-    pub origin: Pos,
+    rotation: u8,
+    origin: Pos,
+}
+
+impl Piece {
+    pub fn new(letter: char, rotation: u8, origin: Pos) -> Self {
+        Self {
+            letter,
+            rotation,
+            origin,
+        }
+    }
+
+    pub fn moved(mut self, amount: Pos) -> Self {
+        self.origin = self.origin + amount;
+        self
+    }
+
+    pub fn rotated_cw(mut self) -> Self {
+        self.rotation = (self.rotation + 1) % 4;
+        self
+    }
+
+    pub fn tiles<'a, S>(&'a self, shapes: &S) -> [Pos; 4]
+    where
+        S: Index<&'a char, Output = Shape>,
+    {
+        shapes[&self.letter].rotated(self.rotation).at(self.origin)
+    }
 }
 
 #[derive(Clone, Copy)]
