@@ -99,3 +99,32 @@ impl Shape {
         self
     }
 }
+
+pub struct GameProgress {
+    pub levels_to_win: u8,
+    pub level: u8,
+
+    rows_per_level: u8,
+    level_progress: u8,
+}
+
+impl GameProgress {
+    pub fn new(levels_to_win: u8, rows_per_level: u8) -> Self {
+        Self {
+            levels_to_win,
+            level: 0,
+
+            rows_per_level,
+            level_progress: 0,
+        }
+    }
+
+    pub fn add_rows(&mut self, count: u8) {
+        self.level_progress += count;
+
+        while self.level_progress >= self.rows_per_level {
+            self.level_progress -= self.rows_per_level;
+            self.level += 1;
+        }
+    }
+}

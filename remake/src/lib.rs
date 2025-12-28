@@ -1,11 +1,12 @@
 mod game;
 mod texture;
 mod tile;
+mod time;
 
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{TimeDelta, Utc};
 use rand::Rng;
 use wgpu::util::DeviceExt;
 use wgpu_text::{
@@ -27,8 +28,9 @@ use winit::{
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    game::{Board, Piece, Pos, Shape},
+    game::{Board, GameProgress, Piece, Pos, Shape},
     tile::{Tile, TileRenderer, Vertex},
+    time::{Clock, Timer},
 };
 
 pub mod fonts {
@@ -45,30 +47,23 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     scale_factor: f32,
     is_surface_configured: bool,
-
-    tile_renderer: TileRenderer,
-    piece_vertex_buffer: wgpu::Buffer,
-    piece_texture_bind_groups: HashMap<char, wgpu::BindGroup>,
-    shapes: HashMap<char, Shape>,
-
-    board: Board,
-
-    has_started: bool,
-    is_game_over: bool,
-    is_paused: bool,
-    moving_piece: Option<Piece>,
-    next_shape: Option<char>,
-
-    levels_to_win: u8,
-    rows_per_level: u8,
-    level: u8,
-    level_progress: u8,
-
-    time_since_last_move: TimeDelta,
-    time_of_last_update: DateTime<Utc>,
+    clock: Clock,
 
     fonts: HashMap<&'static [u8], FontId>,
     text_brush: TextBrush<FontRef<'static>>,
+    tile_renderer: TileRenderer,
+    piece_vertex_buffer: wgpu::Buffer,
+    piece_texture_bind_groups: HashMap<char, wgpu::BindGroup>,
+
+    board: Board,
+    has_started: bool,
+    is_game_over: bool,
+    is_paused: bool,
+    shapes: HashMap<char, Shape>,
+    moving_piece_timer: Timer,
+    moving_piece: Option<Piece>,
+    next_shape: Option<char>,
+    progress: GameProgress,
 }
 
 impl State {
@@ -210,12 +205,9 @@ impl State {
             moving_piece: None,
             next_shape: None,
 
-            levels_to_win: 60,
-            rows_per_level: 10,
-            level: 0,
-            level_progress: 0,
-            time_since_last_move: TimeDelta::zero(),
-            time_of_last_update: Utc::now(),
+            progress: GameProgress::new(60, 10),
+            moving_piece_timer: Timer::new(),
+            clock: Clock::now(),
 
             fonts,
             text_brush,
@@ -359,12 +351,7 @@ impl State {
         }
     }
 
-    fn create_tile_vertices(
-        &self,
-        tile_width: f32,
-        tile_height: f32,
-        letter: char,
-    ) -> Vec<Vertex> {
+    fn create_tile_vertices(&self, tile_width: f32, tile_height: f32, letter: char) -> Vec<Vertex> {
         let mut spots: Vec<(u8, u8)> = Vec::new();
 
         if !self.is_paused || self.is_game_over {
@@ -459,7 +446,7 @@ impl State {
     fn time_between_moves(&self) -> TimeDelta {
         use std::f32::consts::PI;
 
-        let progress = self.level as f32 / self.levels_to_win as f32;
+        let progress = self.progress.level as f32 / self.progress.levels_to_win as f32;
         let speed_up = (progress * PI / 2.0).sin();
         TimeDelta::milliseconds(((1.0 - speed_up) * 800.0) as i64)
     }
@@ -579,14 +566,10 @@ impl State {
                 }
             }
         }
-        self.level_progress += removed_rows;
+        self.progress.add_rows(removed_rows);
     }
 
-    fn update(&mut self) {
-        let now = Utc::now();
-        let time_passed = now.signed_duration_since(self.time_of_last_update);
-        self.time_of_last_update = now;
-
+    fn update(&mut self, time_passed: TimeDelta) {
         if !self.has_started {
             return;
         }
@@ -597,15 +580,8 @@ impl State {
             return;
         }
 
-        self.time_since_last_move += time_passed;
-
-        if self.level_progress >= self.rows_per_level {
-            self.level_progress -= self.rows_per_level;
-            self.level += 1;
-        }
-        if self.time_since_last_move >= self.time_between_moves() {
-            self.time_since_last_move -= self.time_between_moves();
-
+        self.moving_piece_timer.advance(time_passed);
+        while self.moving_piece_timer.tick(self.time_between_moves()) {
             if let Some(piece) = self.moving_piece {
                 let updated = Piece {
                     origin: piece.origin + Pos::new(0, 1),
@@ -627,7 +603,7 @@ impl State {
                 origin: Pos { x: 4, y: 1 },
             };
             self.moving_piece = Some(piece);
-            self.time_since_last_move = TimeDelta::zero();
+            self.moving_piece_timer.reset();
 
             if self.piece_collides(piece) {
                 self.is_game_over = true;
@@ -749,7 +725,8 @@ impl ApplicationHandler<State> for App {
                 state.scale_factor = scale_factor as f32;
             }
             WindowEvent::RedrawRequested => {
-                state.update();
+                let time_passed = state.clock.update(Utc::now());
+                state.update(time_passed);
                 match state.render() {
                     Ok(_) => {}
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
