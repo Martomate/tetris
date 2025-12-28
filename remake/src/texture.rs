@@ -17,6 +17,19 @@ impl Texture {
         Self::from_image(device, queue, &img, Some(label))
     }
 
+    pub fn from_color(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color: [u8; 4],
+        label: &str,
+    ) -> anyhow::Result<Self> {
+        let mut img = image::DynamicImage::new_rgba8(1, 1);
+        for p in img.as_mut_rgba8().unwrap().pixels_mut() {
+            p.0 = color;
+        }
+        Self::from_image(device, queue, &img, Some(label))
+    }
+
     pub fn from_image(
         device: &wgpu::Device,
         queue: &wgpu::Queue,

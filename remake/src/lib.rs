@@ -165,6 +165,10 @@ impl State {
             piece_texture_bind_groups.insert(ch, tile_renderer.create_bind_group(&device, &tex));
         }
 
+        let tex = texture::Texture::from_color(&device, &queue, [0, 0, 80, 200], "ghost_piece")
+            .context("creating ghost piece texture")?;
+        piece_texture_bind_groups.insert('G', tile_renderer.create_bind_group(&device, &tex));
+
         let piece_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: &[0; Vertex::desc().array_stride as usize * 6 * 10 * 20],
@@ -335,7 +339,7 @@ impl State {
 
         let mut vertices_written: u32 = 0;
 
-        for (letter, bind_group) in &self.piece_texture_bind_groups {
+        for (&letter, bind_group) in &self.piece_texture_bind_groups {
             let vertices = self.create_tile_vertices(tile_width, tile_height, letter);
 
             let buffer_offset = vertices_written as u64 * Vertex::desc().array_stride;
@@ -359,13 +363,13 @@ impl State {
         &self,
         tile_width: f32,
         tile_height: f32,
-        letter: &char,
+        letter: char,
     ) -> Vec<Vertex> {
         let mut spots: Vec<(u8, u8)> = Vec::new();
 
         if !self.is_paused || self.is_game_over {
             for (y, row) in self.board.tiles.iter().enumerate() {
-                for (x, l) in row.iter().enumerate() {
+                for (x, &l) in row.iter().enumerate() {
                     if l == letter {
                         spots.push((x as u8, y as u8));
                     }
@@ -373,8 +377,37 @@ impl State {
             }
         }
 
-        if let Some(piece) = self.moving_piece.filter(|p| p.letter == *letter) {
-            for pos in self.shapes[letter].rotated(piece.rotation).at(piece.origin) {
+        if letter == 'G'
+            && !self.is_paused
+            && !self.is_game_over
+            && let Some(piece) = self.moving_piece
+        {
+            let mut piece = piece;
+            loop {
+                let updated = Piece {
+                    origin: piece.origin + Pos::new(0, 1),
+                    ..piece
+                };
+                if self.piece_collides(updated) {
+                    break;
+                }
+                piece = updated;
+            }
+            for pos in self.shapes[&piece.letter]
+                .rotated(piece.rotation)
+                .at(piece.origin)
+            {
+                if self.board.contains(pos) {
+                    spots.push((pos.x as u8, pos.y as u8));
+                }
+            }
+        }
+
+        if let Some(piece) = self.moving_piece.filter(|p| p.letter == letter) {
+            for pos in self.shapes[&piece.letter]
+                .rotated(piece.rotation)
+                .at(piece.origin)
+            {
                 if self.board.contains(pos) {
                     spots.push((pos.x as u8, pos.y as u8));
                 }
