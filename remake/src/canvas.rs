@@ -9,7 +9,6 @@ pub struct Canvas {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
-    pub is_surface_configured: bool,
 }
 
 impl Canvas {
@@ -76,7 +75,6 @@ impl Canvas {
             device,
             queue,
             config,
-            is_surface_configured: false,
         })
     }
 
@@ -84,6 +82,5 @@ impl Canvas {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        self.is_surface_configured = true;
     }
 }

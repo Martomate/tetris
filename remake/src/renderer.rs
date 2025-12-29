@@ -10,7 +10,9 @@ use wgpu_text::{
 };
 
 use crate::{
-    Game, canvas::Canvas, game::{GameState, Pos}, tile::{Tile, TileRenderer, Vertex}
+    canvas::Canvas,
+    game::{Game, GameState, Pos},
+    tile::{Tile, TileRenderer, Vertex},
 };
 
 pub mod fonts {
@@ -100,8 +102,8 @@ impl Renderer {
         self.scale_factor = scale_factor;
     }
 
-    pub fn render(&mut self, state: &Game, canvas: &Canvas) -> Result<(), wgpu::SurfaceError> {
-        self.update_text(state, canvas);
+    pub fn render(&mut self, game: &Game, canvas: &Canvas) -> Result<(), wgpu::SurfaceError> {
+        self.update_text(game, canvas);
 
         let frame = canvas.surface.get_current_texture()?;
         let view = frame.texture.create_view(&Default::default());
@@ -130,7 +132,7 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            self.render_board(state, canvas, &mut render_pass);
+            self.render_board(game, canvas, &mut render_pass);
             self.render_text(&mut render_pass);
         }
 
@@ -140,8 +142,8 @@ impl Renderer {
         Ok(())
     }
 
-    fn update_text(&mut self, state: &Game, canvas: &Canvas) {
-        let text_sections = self.create_text_sections(state, canvas);
+    fn update_text(&mut self, game: &Game, canvas: &Canvas) {
+        let text_sections = self.create_text_sections(game, canvas);
         if let Err(err) = self
             .text_brush
             .queue(&canvas.device, &canvas.queue, text_sections)
@@ -154,13 +156,13 @@ impl Renderer {
         self.text_brush.draw(render_pass);
     }
 
-    fn create_text_sections(&self, state: &Game, canvas: &Canvas) -> Vec<TextSection<'static>> {
+    fn create_text_sections(&self, game: &Game, canvas: &Canvas) -> Vec<TextSection<'static>> {
         let mut sections = Vec::new();
 
         let cyan_color = [0, 150, 150, 200].map(|c| c as f32 / 255.0);
         let dark_red_color = [150, 0, 0, 255].map(|c| c as f32 / 255.0);
 
-        let big_text = match state.state {
+        let big_text = match game.state {
             GameState::NotStarted => Some((("Press\nSPACE", cyan_color, 60.0), 160.0)),
             GameState::GameOver => Some((("Game Over", dark_red_color, 60.0), 260.0)),
             GameState::Paused => Some((("Press P", cyan_color, 60.0), 160.0)),
@@ -176,7 +178,10 @@ impl Renderer {
                         .with_font_id(self.fonts[fonts::ARIAL_ROUNDED]),
                 )
                 .with_layout(Layout::default().h_align(HorizontalAlign::Center))
-                .with_screen_position((canvas.config.width as f32 / 2.0, y_pos * self.scale_factor));
+                .with_screen_position((
+                    canvas.config.width as f32 / 2.0,
+                    y_pos * self.scale_factor,
+                ));
 
             sections.extend(self.make_text_with_outline(main_section));
         }
@@ -184,17 +189,22 @@ impl Renderer {
         sections
     }
 
-    fn render_board(&mut self, state: &Game, canvas: &Canvas, render_pass: &mut wgpu::RenderPass<'_>) {
+    fn render_board(
+        &mut self,
+        game: &Game,
+        canvas: &Canvas,
+        render_pass: &mut wgpu::RenderPass<'_>,
+    ) {
         render_pass.set_pipeline(&self.tile_renderer.pipeline);
         render_pass.set_vertex_buffer(0, self.piece_vertex_buffer.slice(..));
 
-        let tile_width = 2.0 / state.board.width as f32;
-        let tile_height = 2.0 / state.board.height as f32;
+        let tile_width = 2.0 / game.board.width as f32;
+        let tile_height = 2.0 / game.board.height as f32;
 
         let mut vertices_written: u32 = 0;
 
         for (&letter, bind_group) in &self.piece_texture_bind_groups {
-            let vertices = self.create_tile_vertices(state, tile_width, tile_height, letter);
+            let vertices = self.create_tile_vertices(game, tile_width, tile_height, letter);
 
             let buffer_offset = vertices_written as u64 * Vertex::desc().array_stride;
 
@@ -215,15 +225,15 @@ impl Renderer {
 
     fn create_tile_vertices(
         &self,
-        state: &Game,
+        game: &Game,
         tile_width: f32,
         tile_height: f32,
         letter: char,
     ) -> Vec<Vertex> {
         let mut spots: Vec<(u8, u8)> = Vec::new();
 
-        if state.state != GameState::Paused {
-            for (y, row) in state.board.tiles.iter().enumerate() {
+        if game.state != GameState::Paused {
+            for (y, row) in game.board.tiles.iter().enumerate() {
                 for (x, &l) in row.iter().enumerate() {
                     if l == letter {
                         spots.push((x as u8, y as u8));
@@ -233,28 +243,28 @@ impl Renderer {
         }
 
         if letter == 'G'
-            && state.state != GameState::Paused
-            && state.state != GameState::GameOver
-            && let Some(piece) = state.moving_piece
+            && game.state != GameState::Paused
+            && game.state != GameState::GameOver
+            && let Some(piece) = game.moving_piece
         {
             let mut piece = piece;
             loop {
                 let updated = piece.moved(Pos::new(0, 1));
-                if state.piece_collides(updated) {
+                if game.piece_collides(updated) {
                     break;
                 }
                 piece = updated;
             }
-            for pos in piece.tiles(&state.shapes) {
-                if state.board.contains(pos) {
+            for pos in piece.tiles(&game.shapes) {
+                if game.board.contains(pos) {
                     spots.push((pos.x as u8, pos.y as u8));
                 }
             }
         }
 
-        if let Some(piece) = state.moving_piece.filter(|p| p.letter == letter) {
-            for pos in piece.tiles(&state.shapes) {
-                if state.board.contains(pos) {
+        if let Some(piece) = game.moving_piece.filter(|p| p.letter == letter) {
+            for pos in piece.tiles(&game.shapes) {
+                if game.board.contains(pos) {
                     spots.push((pos.x as u8, pos.y as u8));
                 }
             }
