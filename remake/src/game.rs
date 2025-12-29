@@ -1,4 +1,182 @@
-use std::ops::{Add, Index};
+use std::{
+    collections::HashMap,
+    ops::{Add, Index},
+};
+
+use chrono::TimeDelta;
+use rand::Rng;
+use winit::keyboard::KeyCode;
+
+use crate::time::Timer;
+
+pub struct Game {
+    pub board: Board,
+    pub state: GameState,
+    pub shapes: HashMap<char, Shape>,
+    pub moving_piece_timer: Timer,
+    pub moving_piece: Option<Piece>,
+    pub next_shape: Option<char>,
+    pub progress: GameProgress,
+}
+
+impl Default for Game {
+    fn default() -> Self {
+        let shapes: HashMap<char, Shape> = [
+            ('O', [(0, -1), (0, 0), (1, 0), (1, -1)]),
+            ('I', [(0, -1), (0, 0), (0, 1), (0, 2)]),
+            ('J', [(1, -1), (1, 0), (1, 1), (0, 1)]),
+            ('L', [(0, -1), (0, 0), (0, 1), (1, 1)]),
+            ('Z', [(1, -1), (1, 0), (0, 0), (0, 1)]),
+            ('S', [(0, -1), (0, 0), (1, 0), (1, 1)]),
+            ('T', [(0, -1), (0, 0), (0, 1), (1, 0)]),
+        ]
+        .map(|(l, offsets)| (l, Shape::new(offsets.map(|(dx, dy)| Pos::new(dx, dy)))))
+        .into_iter()
+        .collect();
+
+        Self {
+            shapes,
+            board: Board::new(10, 20),
+            state: GameState::NotStarted,
+            moving_piece: None,
+            next_shape: None,
+
+            progress: GameProgress::new(60, 10),
+            moving_piece_timer: Timer::new(),
+        }
+    }
+}
+
+impl Game {
+    /// 800 ms (level 0) to 0 ms (max level), reducing faster in the beginning
+    fn time_between_moves(&self) -> TimeDelta {
+        use std::f32::consts::PI;
+
+        let progress = self.progress.level as f32 / self.progress.levels_to_win as f32;
+        let speed_up = (progress * PI / 2.0).sin();
+        TimeDelta::milliseconds(((1.0 - speed_up) * 800.0) as i64)
+    }
+
+    pub fn on_focus_changed(&mut self, focused: bool) {
+        if !focused && self.state == GameState::Running {
+            self.state = GameState::Paused;
+        }
+    }
+
+    pub fn handle_key(&mut self, code: KeyCode, is_pressed: bool) {
+        match (code, is_pressed) {
+            (KeyCode::Escape, true) => {
+                self.state = match self.state {
+                    GameState::Running => GameState::Paused,
+                    GameState::Paused => GameState::Running,
+                    state => state,
+                };
+            }
+            (KeyCode::KeyP, true) => {
+                self.state = match self.state {
+                    GameState::Running => GameState::Paused,
+                    GameState::Paused => GameState::Running,
+                    state => state,
+                };
+            }
+            (KeyCode::Space, true) => {
+                if self.state == GameState::NotStarted {
+                    self.state = GameState::Running;
+                }
+            }
+            (KeyCode::ArrowUp, true) => {
+                if let Some(piece) = self.try_update_moving_piece(|p| p.rotated_cw()) {
+                    self.moving_piece = Some(piece);
+                }
+            }
+            (KeyCode::ArrowLeft, true) => {
+                if let Some(piece) = self.try_update_moving_piece(|p| p.moved(Pos::new(-1, 0))) {
+                    self.moving_piece = Some(piece);
+                }
+            }
+            (KeyCode::ArrowDown, true) => {
+                if let Some(piece) = self.try_update_moving_piece(|p| p.moved(Pos::new(0, 1))) {
+                    self.moving_piece = Some(piece);
+                }
+            }
+            (KeyCode::ArrowRight, true) => {
+                if let Some(piece) = self.try_update_moving_piece(|p| p.moved(Pos::new(1, 0))) {
+                    self.moving_piece = Some(piece);
+                }
+            }
+            (KeyCode::KeyD, true) => {
+                while let Some(piece) = self.try_update_moving_piece(|p| p.moved(Pos::new(0, 1))) {
+                    self.moving_piece = Some(piece);
+                }
+
+                self.handle_dropped_piece();
+            }
+            _ => {}
+        }
+    }
+
+    fn try_update_moving_piece(&mut self, update_fn: impl FnOnce(Piece) -> Piece) -> Option<Piece> {
+        if let Some(piece) = self.moving_piece {
+            let updated = update_fn(piece);
+            if !self.piece_collides(updated) {
+                return Some(updated);
+            }
+        }
+        None
+    }
+
+    fn handle_dropped_piece(&mut self) {
+        if let Some(piece) = self.moving_piece.take() {
+            for pos in piece.tiles(&self.shapes) {
+                self.board.set_tile(pos, piece.letter);
+            }
+        }
+
+        self.progress.add_rows(self.board.remove_full_rows());
+    }
+
+    pub fn update(&mut self, time_passed: TimeDelta) {
+        if self.state != GameState::Running {
+            return;
+        }
+
+        self.moving_piece_timer.advance(time_passed);
+        while self.moving_piece_timer.tick(self.time_between_moves()) {
+            if let Some(piece) = self.try_update_moving_piece(|p| p.moved(Pos::new(0, 1))) {
+                self.moving_piece = Some(piece);
+            } else {
+                self.handle_dropped_piece();
+            }
+        }
+        if self.moving_piece.is_none()
+            && let Some(letter) = self.next_shape.take()
+        {
+            let piece = Piece::new(letter, 0, Pos { x: 4, y: 1 });
+            self.moving_piece = Some(piece);
+            self.moving_piece_timer.reset();
+
+            if self.piece_collides(piece) {
+                self.state = GameState::GameOver;
+            }
+        }
+        if self.next_shape.is_none() {
+            self.next_shape = Some(random_shape(
+                &self.shapes.keys().cloned().collect::<Vec<char>>(),
+            ));
+        }
+    }
+
+    pub fn piece_collides(&self, piece: Piece) -> bool {
+        piece
+            .tiles(&self.shapes)
+            .iter()
+            .any(|&pos| !self.board.contains(pos) || self.board.get_tile(pos).is_some())
+    }
+}
+
+fn random_shape(values: &[char]) -> char {
+    values[rand::rng().random_range(0..values.len())]
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum GameState {
